@@ -1,0 +1,12 @@
+{
+  "id": "obsidian-sync",
+  "name": "Obsidian Sync",
+  "version": "1.0.0",
+  "minAppVersion": "0.15.0",
+  "description": "Sync your Obsidian vault using Google Drive as storage",
+  "author": "Obsidian Sync Team",
+  "authorUrl": "",
+  "fundingUrl": "",
+  "isDesktopOnly": false,
+  "main": "main.js"
+}

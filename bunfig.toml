@@ -1,0 +1,12 @@
+[workspace]
+# Define the workspace root
+root = "."
+
+# Specify the packages directory
+packages = ["packages/*"]
+
+# Shared dependencies (if any)
+# shared = ["shared"]
+
+# Development dependencies
+devDependencies = ["bun", "typescript", "eslint"]

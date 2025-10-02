@@ -1,0 +1,7 @@
+{
+  "serverUrl": "http://localhost:3000",
+  "vaultId": "test-vault",
+  "syncInterval": 30,
+  "autoSync": true,
+  "conflictResolution": "manual"
+}

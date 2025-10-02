@@ -1,0 +1,28 @@
+{
+  "name": "@obs-sync/plugin",
+  "version": "1.0.0",
+  "scripts": {
+    "build": "bun build src/main.ts --outdir . --format cjs",
+    "dev": "bun build src/main.ts --outdir . --format cjs --watch",
+    "lint": "eslint src --ext .ts",
+    "lint:fix": "eslint src --ext .ts --fix",
+    "typecheck": "tsc --noEmit",
+    "test": "node --max-old-space-size=4096 ./node_modules/.bin/jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage"
+  },
+  "dependencies": {
+    "obsidian": "^1.8.7"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0",
+    "eslint": "^8.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "jest": "^29.0.0",
+    "@types/jest": "^29.0.0",
+    "ts-jest": "^29.0.0",
+    "jest-environment-node": "^29.0.0"
+  }
+}
