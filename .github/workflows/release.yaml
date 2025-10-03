@@ -85,3 +85,31 @@ jobs:
         run: |
           echo "Tag ${{ steps.extract_version.outputs.version }} already exists"
           echo "If you want to re-release, delete the tag first: git push --delete origin ${{ steps.extract_version.outputs.version }}"
+
+      - name: Update package.json and manifest.json versions
+        run: |
+          VERSION="${{ steps.extract_version.outputs.version }}"
+          echo "Updating version to $VERSION in package.json and manifest.json"
+
+          # Update package.json
+          cd packages/plugin
+          sed -i "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" package.json
+
+          # Update manifest.json
+          sed -i "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" manifest.json
+
+          # Show the changes
+          echo "Updated package.json:"
+          grep "version" package.json
+          echo "Updated manifest.json:"
+          grep "version" manifest.json
+
+          cd ../..
+
+      - name: Commit version changes
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add packages/plugin/package.json packages/plugin/manifest.json
+          git diff --staged --quiet || git commit -m "chore: bump version to ${{ steps.extract_version.outputs.version }}"
+          git push origin "${GITHUB_REF#refs/heads/}"
