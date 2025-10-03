@@ -1,4 +1,4 @@
-# TODO List for Obsidian Sync Service
+# TODO List for Vync
 
 ## Phase 1: Setup and Boilerplate ✅ COMPLETED
 - [x] Initialize Git repository

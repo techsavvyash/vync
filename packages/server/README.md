@@ -1,5 +1,5 @@
 # Obsidian Sync Server
-
+**This is not needed anymore, I have kept it here for documentation purposes (and for reference in extending future use-cases) ** 
 Backend server for syncing Obsidian vaults to Google Drive with real-time conflict detection and folder structure preservation.
 
 ## Features

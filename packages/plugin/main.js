@@ -29,7 +29,7 @@ var __export = (target, all) => {
 // src/main.ts
 var exports_main = {};
 __export(exports_main, {
-  default: () => ObsidianSyncPlugin
+  default: () => VyncPlugin
 });
 module.exports = __toCommonJS(exports_main);
 var import_obsidian6 = require("obsidian");
@@ -2121,7 +2121,7 @@ class SyncIndexFile {
   vault;
   indexPath;
   CURRENT_VERSION = "1.0.0";
-  constructor(vault, pluginDir = ".obsidian/plugins/obsidian-sync") {
+  constructor(vault, pluginDir = ".obsidian/plugins/vync") {
     this.vault = vault;
     this.indexPath = `${pluginDir}/sync-index.json`;
   }
@@ -2393,7 +2393,7 @@ var DEFAULT_SETTINGS = {
   pageToken: undefined
 };
 
-class ObsidianSyncPlugin extends import_obsidian6.Plugin {
+class VyncPlugin extends import_obsidian6.Plugin {
   settings = DEFAULT_SETTINGS;
   googleAuthService = null;
   syncTimer = null;
@@ -2413,10 +2413,10 @@ class ObsidianSyncPlugin extends import_obsidian6.Plugin {
       console.log("Generated new syncAgentId:", this.settings.syncAgentId);
     }
     await this.initializeGoogleDrive();
-    this.addRibbonIcon("sync", "Obsidian Sync", () => {
+    this.addRibbonIcon("sync", "Vync", () => {
       this.syncVault();
     });
-    this.addSettingTab(new ObsidianSyncSettingTab(this.app, this));
+    this.addSettingTab(new VyncSettingTab(this.app, this));
     this.initializeServices();
     this.addCommand({
       id: "sync-vault",
@@ -2458,14 +2458,14 @@ class ObsidianSyncPlugin extends import_obsidian6.Plugin {
         }
       }
     });
-    console.log("Obsidian Sync plugin loaded");
+    console.log("Vync plugin loaded");
   }
   onunload() {
     this.stopAutoSync();
     if (this.vaultWatcher) {
       this.vaultWatcher.stopWatching();
     }
-    console.log("Obsidian Sync plugin unloaded");
+    console.log("Vync plugin unloaded");
   }
   async initializeServices() {
     try {
@@ -2521,10 +2521,10 @@ class ObsidianSyncPlugin extends import_obsidian6.Plugin {
         this.startAutoSync();
       }
       this.performInitialSync();
-      new import_obsidian6.Notice("Obsidian Sync initialized successfully");
+      new import_obsidian6.Notice("Vync initialized successfully");
     } catch (error) {
-      console.error("Failed to initialize Obsidian Sync:", error);
-      new import_obsidian6.Notice("Failed to initialize Obsidian Sync: " + error.message);
+      console.error("Failed to initialize Vync:", error);
+      new import_obsidian6.Notice("Failed to initialize Vync: " + error.message);
     }
   }
   async loadSettings() {
@@ -2746,7 +2746,7 @@ class ObsidianSyncPlugin extends import_obsidian6.Plugin {
   }
 }
 
-class ObsidianSyncSettingTab extends import_obsidian6.PluginSettingTab {
+class VyncSettingTab extends import_obsidian6.PluginSettingTab {
   plugin;
   constructor(app, plugin) {
     super(app, plugin);
@@ -2755,7 +2755,7 @@ class ObsidianSyncSettingTab extends import_obsidian6.PluginSettingTab {
   async display() {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "Obsidian Sync Settings" });
+    containerEl.createEl("h2", { text: "Vync Settings" });
     containerEl.createEl("p", {
       text: "This plugin syncs your vault directly to Google Drive. No server required!",
       cls: "setting-item-description"

@@ -1,4 +1,4 @@
-# Obsidian Sync Plugin Installation Guide
+# Vync Plugin Installation Guide
 
 ## Prerequisites
 
@@ -38,10 +38,10 @@ Since this is a custom plugin, you'll need to install it manually:
 1. **Create Plugin Directory**:
    ```
    # On macOS/Linux
-   mkdir -p ~/Documents/Obsidian\ Vault/.obsidian/plugins/obsidian-sync
+   mkdir -p ~/Documents/Obsidian\ Vault/.obsidian/plugins/vync
 
    # On Windows
-   mkdir "%USERPROFILE%\Documents\Obsidian Vault\.obsidian\plugins\obsidian-sync"
+   mkdir "%USERPROFILE%\Documents\Obsidian Vault\.obsidian\plugins\vync"
    ```
 
 2. **Copy Plugin Files**:
@@ -56,7 +56,7 @@ Since this is a custom plugin, you'll need to install it manually:
 ### Step 4: Configure the Plugin
 
 1. **Open Obsidian Settings**
-2. **Find "Obsidian Sync"** in the plugin list
+2. **Find "Vync"** in the plugin list
 3. **Enable the plugin** by toggling it on
 4. **Configure Settings**:
    - **Server URL**: `http://localhost:3000` (or your server URL)
@@ -107,9 +107,9 @@ Since this is a custom plugin, you'll need to install it manually:
 You can manually test the plugin:
 
 1. **Open Command Palette** (Ctrl/Cmd + P)
-2. **Search for "Obsidian Sync"** commands
+2. **Search for "Vync"** commands
 3. **Run "Sync Vault"** command
-4. **Run "Test Server Connection"** command
+4. **Run "Test Connection"** command
 
 ## Server Setup
 
@@ -134,7 +134,7 @@ Before using the plugin, you need to set up and run the sync server:
 
 4. **Verify server is running**:
    - Open browser to `http://localhost:3000`
-   - You should see "Obsidian Sync Server is running!"
+   - You should see "Vync Server is running!"
 
 ### Server Configuration
 
@@ -207,4 +207,4 @@ If you want to modify the plugin:
 
 **Installation Complete!** 🎉
 
-Your Obsidian Sync plugin is now ready to use. Start by testing the connection and then try syncing a few files to see the system in action!
+Your Vync plugin is now ready to use. Start by testing the connection and then try syncing a few files to see the system in action!

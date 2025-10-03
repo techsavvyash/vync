@@ -1,4 +1,4 @@
-# Obsidian Sync with Google Drive
+# Vync
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -20,7 +20,7 @@ A complete synchronization solution for Obsidian vaults with Google Drive backen
 ### 1. Clone and Install
 ```bash
 git clone <repository-url>
-cd obs-sync
+cd vync
 bun install
 ```
 
@@ -62,7 +62,7 @@ bun run build
 ## 🏗️ Architecture
 
 ```
-obs-sync/
+vync/
 ├── packages/
 │   ├── server/          # Backend sync server
 │   │   ├── src/
@@ -96,7 +96,7 @@ GOOGLE_REDIRECT_URI=https://your-domain.com/auth/google/callback
 
 ### Obsidian Plugin
 ```
-Settings → Obsidian Sync:
+Settings → Vync:
 - Server URL: http://localhost:3000
 - Vault ID: my-vault
 - Auto Sync: ON
@@ -120,8 +120,8 @@ vercel deploy
 railway up
 
 # Docker
-docker build -t obsidian-sync .
-docker run -p 3000:3000 obsidian-sync
+docker build -t vync .
+docker run -p 3000:3000 vync
 ```
 
 **📖 Full guide:** [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md)

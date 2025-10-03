@@ -190,7 +190,7 @@ cd packages/server
 git pull origin main
 bun install
 bun run build
-pm2 restart obsidian-sync
+pm2 restart vync
 
 # Update plugin (in Obsidian)
 1. Close Obsidian

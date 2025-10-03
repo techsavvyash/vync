@@ -1,7 +1,7 @@
 /**
  * Sync Index File Manager
  * Handles reading/writing the sync index to a separate JSON file
- * Located at: .obsidian/plugins/obsidian-sync/sync-index.json
+ * Located at: .obsidian/plugins/vync/sync-index.json
  */
 
 import { Vault } from 'obsidian'
@@ -21,7 +21,7 @@ export class SyncIndexFile {
 	private indexPath: string
 	private readonly CURRENT_VERSION = '1.0.0'
 
-	constructor(vault: Vault, pluginDir: string = '.obsidian/plugins/obsidian-sync') {
+	constructor(vault: Vault, pluginDir: string = '.obsidian/plugins/vync') {
 		this.vault = vault
 		this.indexPath = `${pluginDir}/sync-index.json`
 	}

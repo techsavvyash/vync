@@ -1,5 +1,5 @@
 {
-  "name": "@techsavvyash/obs-sync-plugin",
+  "name": "@techsavvyash/vync",
   "version": "0.0.1",
   "scripts": {
     "build": "bun build src/main.ts --outdir . --format cjs --external obsidian",

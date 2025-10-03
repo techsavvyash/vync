@@ -1,4 +1,4 @@
-# Obsidian Sync Plugin
+# Vync
 
 A **serverless** plugin for syncing Obsidian vaults directly to Google Drive.
 
@@ -23,7 +23,7 @@ The plugin syncs your vault directly to Google Drive:
 
 ## Installation
 
-1. Copy `main.js` and `manifest.json` to your Obsidian vault `.obsidian/plugins/obsidian-sync/`
+1. Copy `main.js` and `manifest.json` to your Obsidian vault `.obsidian/plugins/vync/`
 2. Enable the plugin in Obsidian settings
 3. Configure Google OAuth credentials (see Configuration below)
 
@@ -42,7 +42,7 @@ The plugin syncs your vault directly to Google Drive:
 ### Step 2: Configure Plugin
 
 1. Open Obsidian Settings
-2. Navigate to the Obsidian Sync plugin settings
+2. Navigate to the Vync plugin settings
 3. Enter your **Google Client ID** and **Google Client Secret**
 4. Enter a unique **Vault ID** (e.g., "my-vault")
 5. Click **"Authenticate with Google Drive"**

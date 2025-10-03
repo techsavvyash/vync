@@ -6,7 +6,7 @@ import { SyncStateManager } from './services/syncState'
 import { SyncIndexFile } from './services/syncIndexFile'
 import { GoogleDriveAuthService, GoogleDriveTokens } from './services/googleDriveAuth'
 
-interface ObsidianSyncSettings {
+interface VyncSettings {
 	// Google Drive OAuth settings
 	googleClientId: string
 	googleClientSecret: string
@@ -24,7 +24,7 @@ interface ObsidianSyncSettings {
 	pageToken?: string // Google Drive changes.list pageToken (for incremental sync)
 }
 
-const DEFAULT_SETTINGS: ObsidianSyncSettings = {
+const DEFAULT_SETTINGS: VyncSettings = {
 	googleClientId: '',
 	googleClientSecret: '',
 	googleTokens: null,
@@ -37,8 +37,8 @@ const DEFAULT_SETTINGS: ObsidianSyncSettings = {
 	pageToken: undefined // Initialized on first sync
 }
 
-export default class ObsidianSyncPlugin extends Plugin {
-	settings: ObsidianSyncSettings = DEFAULT_SETTINGS
+export default class VyncPlugin extends Plugin {
+	settings: VyncSettings = DEFAULT_SETTINGS
 
 	// Google Drive services
 	private googleAuthService: GoogleDriveAuthService | null = null
@@ -70,12 +70,12 @@ export default class ObsidianSyncPlugin extends Plugin {
 		await this.initializeGoogleDrive()
 
 		// Add ribbon icon
-		this.addRibbonIcon('sync', 'Obsidian Sync', () => {
+		this.addRibbonIcon('sync', 'Vync', () => {
 			this.syncVault()
 		})
 
 		// Add settings tab
-		this.addSettingTab(new ObsidianSyncSettingTab(this.app, this))
+		this.addSettingTab(new VyncSettingTab(this.app, this))
 
 		// Initialize services
 		this.initializeServices()
@@ -124,7 +124,7 @@ export default class ObsidianSyncPlugin extends Plugin {
 			}
 		})
 
-		console.log('Obsidian Sync plugin loaded')
+		console.log('Vync plugin loaded')
 	}
 
 	onunload() {
@@ -132,7 +132,7 @@ export default class ObsidianSyncPlugin extends Plugin {
 		if (this.vaultWatcher) {
 			this.vaultWatcher.stopWatching()
 		}
-		console.log('Obsidian Sync plugin unloaded')
+		console.log('Vync plugin unloaded')
 	}
 
 	private async initializeServices() {
@@ -231,10 +231,10 @@ export default class ObsidianSyncPlugin extends Plugin {
 			// Perform initial sync on startup to check for remote changes
 			this.performInitialSync()
 
-			new Notice('Obsidian Sync initialized successfully')
+			new Notice('Vync initialized successfully')
 		} catch (error) {
-			console.error('Failed to initialize Obsidian Sync:', error)
-			new Notice('Failed to initialize Obsidian Sync: ' + (error as Error).message)
+			console.error('Failed to initialize Vync:', error)
+			new Notice('Failed to initialize Vync: ' + (error as Error).message)
 		}
 	}
 
@@ -546,10 +546,10 @@ export default class ObsidianSyncPlugin extends Plugin {
 	}
 }
 
-class ObsidianSyncSettingTab extends PluginSettingTab {
-	plugin: ObsidianSyncPlugin
+class VyncSettingTab extends PluginSettingTab {
+	plugin: VyncPlugin
 
-	constructor(app: App, plugin: ObsidianSyncPlugin) {
+	constructor(app: App, plugin: VyncPlugin) {
 		super(app, plugin)
 		this.plugin = plugin
 	}
@@ -558,7 +558,7 @@ class ObsidianSyncSettingTab extends PluginSettingTab {
 		const { containerEl } = this
 		containerEl.empty()
 
-		containerEl.createEl('h2', { text: 'Obsidian Sync Settings' })
+		containerEl.createEl('h2', { text: 'Vync Settings' })
 
 		// Info message about serverless architecture
 		containerEl.createEl('p', {

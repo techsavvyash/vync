@@ -1,6 +1,6 @@
 # Quick Start Guide
 
-Get up and running with Obsidian Sync in under 10 minutes.
+Get up and running with Vync in under 10 minutes.
 
 ## Prerequisites
 
@@ -13,7 +13,7 @@ Get up and running with Obsidian Sync in under 10 minutes.
 ### 1.1 Clone and Install
 ```bash
 git clone <repository-url>
-cd obs-sync/packages/server
+cd vync/packages/server
 bun install
 ```
 
@@ -104,7 +104,7 @@ bun run build
 
 **Option A: Manual Install**
 1. Copy `packages/plugin` folder to your vault's `.obsidian/plugins/`
-2. Rename to `obsidian-sync`
+2. Rename to `vync`
 3. Reload Obsidian (Cmd/Ctrl + R)
 4. Enable plugin in Settings → Community Plugins
 
@@ -114,7 +114,7 @@ bun run build
 
 ### 3.3 Configure Plugin
 
-Open Obsidian Settings → Obsidian Sync:
+Open Obsidian Settings → Vync:
 
 ```
 Server URL: http://localhost:3000
@@ -175,7 +175,7 @@ PORT=8080 bun run dev
 **Error**: Files created but not uploaded
 ```bash
 # Solution 1: Check auto-sync is enabled
-Settings → Obsidian Sync → Auto Sync: ON
+Settings → Vync → Auto Sync: ON
 
 # Solution 2: Run manual reconciliation
 Cmd/Ctrl + P → "Reconcile Sync Index"
@@ -315,7 +315,7 @@ After completing this guide, you should have:
 ✅ Folder structure preserved in Google Drive
 ✅ Real-time sync working on file save
 
-**Congratulations! 🎉** Your Obsidian Sync is now fully operational!
+**Congratulations! 🎉** Your Vync is now fully operational!
 
 ---
 
