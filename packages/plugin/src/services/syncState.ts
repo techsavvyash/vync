@@ -59,8 +59,12 @@ export class SyncStateManager {
       this.state = {
         ...initialState,
         lastRemoteCheck: initialState.lastRemoteCheck || 0,
-        files: new Map(Object.entries(initialState.files || {})),
-        folders: new Map(Object.entries(initialState.folders || {}))
+        files: initialState.files instanceof Map
+          ? initialState.files
+          : new Map(Object.entries(initialState.files || {})),
+        folders: initialState.folders instanceof Map
+          ? initialState.folders
+          : new Map(Object.entries(initialState.folders || {}))
       }
     } else {
       // Initialize new state
@@ -616,20 +620,24 @@ export class SyncStateManager {
    * Handle folder rename/move
    */
   renameFolder(oldPath: string, newPath: string): void {
-    const folderState = this.state.folders.get(oldPath)
+    // Normalize folder paths to ensure they end with /
+    const normalizedOldPath = oldPath.endsWith('/') ? oldPath : oldPath + '/'
+    const normalizedNewPath = newPath.endsWith('/') ? newPath : newPath + '/'
+
+    const folderState = this.state.folders.get(normalizedOldPath)
 
     if (folderState) {
       // Update folder path
-      folderState.path = newPath
-      this.state.folders.set(newPath, folderState)
-      this.state.folders.delete(oldPath)
+      folderState.path = normalizedNewPath
+      this.state.folders.set(normalizedNewPath, folderState)
+      this.state.folders.delete(normalizedOldPath)
 
       // Update all files in the folder
       const filesToUpdate: Array<[string, FileSyncState]> = []
 
       this.state.files.forEach((fileState, filePath) => {
-        if (filePath.startsWith(oldPath + '/')) {
-          const newFilePath = filePath.replace(oldPath, newPath)
+        if (filePath.startsWith(normalizedOldPath)) {
+          const newFilePath = normalizedNewPath + filePath.substring(normalizedOldPath.length)
           fileState.path = newFilePath
           filesToUpdate.push([newFilePath, fileState])
           this.state.files.delete(filePath)
@@ -641,7 +649,7 @@ export class SyncStateManager {
         this.state.files.set(path, state)
       })
 
-      console.log(`📁 Renamed folder: ${oldPath} → ${newPath}`)
+      console.log(`📁 Renamed folder: ${normalizedOldPath} → ${normalizedNewPath}`)
       console.log(`   Updated ${filesToUpdate.length} file(s) in folder`)
     }
   }
