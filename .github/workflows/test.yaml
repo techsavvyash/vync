@@ -27,4 +27,6 @@ jobs:
         run: bun install
 
       - name: Run tests
-        run: cd packages/plugin && bun install && bun test
+        run: cd packages/plugin && bun test
+        env:
+          CI: true
