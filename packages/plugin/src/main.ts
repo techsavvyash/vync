@@ -206,11 +206,23 @@ export default class VyncPlugin extends Plugin {
 						}
 					}
 				} else {
-					// Track file changes for debounced sync
+					// Handle file changes
 					console.log(`File ${change.changeType}: ${change.filePath}`)
 
-					// Track the change for debounced batch sync
-					this.pendingChanges.add(change.filePath)
+					// Check if this is a rename operation (created with oldPath set)
+					if (change.changeType === 'created' && change.oldPath && this.syncService && this.settings.autoSync) {
+						// This is a file rename - handle immediately
+						console.log(`  📝 File renamed: ${change.oldPath} → ${change.filePath}`)
+						try {
+							await this.syncService.handleFileRename(change.oldPath, change.filePath)
+							await this.saveSyncState()
+						} catch (error) {
+							console.error(`Failed to handle file rename:`, error)
+						}
+					} else {
+						// Track the change for debounced batch sync
+						this.pendingChanges.add(change.filePath)
+					}
 				}
 
 				// Trigger debounced sync to batch process all pending changes

@@ -681,6 +681,42 @@ export class SyncService {
 		}
 	}
 
+	// Method to handle file rename events
+	async handleFileRename(oldPath: string, newPath: string): Promise<void> {
+		console.log(`📝 Handling file rename: ${oldPath} → ${newPath}`)
+
+		try {
+			if (!this.syncStateManager) {
+				console.warn('  ⚠️ No sync state manager available')
+				return
+			}
+
+			// Get the remote file ID for the old path
+			const remoteFileId = this.syncStateManager.getRemoteFileId(oldPath)
+
+			if (remoteFileId && this.syncAgentId) {
+				// Add tombstone for the old file path (will delete from Drive after grace period)
+				await this.tombstoneManager.addTombstone(remoteFileId, oldPath, this.syncAgentId)
+				console.log(`  📌 Added tombstone for old path: ${oldPath}`)
+			}
+
+			// Remove old path from index
+			this.syncStateManager.removeFile(oldPath)
+			console.log(`  🗑️ Removed old path from index: ${oldPath}`)
+
+			// Upload the file with the new path
+			const newFile = this.vault.getAbstractFileByPath(newPath)
+			if (newFile instanceof TFile) {
+				await this.uploadSingleFile(newFile)
+				console.log(`  ✅ Uploaded file with new path: ${newPath}`)
+			} else {
+				console.warn(`  ⚠️ New file not found: ${newPath}`)
+			}
+		} catch (error) {
+			console.error(`  ❌ Failed to handle file rename from ${oldPath} to ${newPath}:`, error)
+		}
+	}
+
 	// Method to handle folder rename events
 	async handleFolderRename(oldPath: string, newPath: string): Promise<void> {
 		console.log(`📝 Handling folder rename: ${oldPath} → ${newPath}`)

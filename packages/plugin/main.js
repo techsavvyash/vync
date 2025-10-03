@@ -1341,6 +1341,31 @@ class SyncService {
       console.error(`  ❌ Failed to handle folder deletion for ${folderPath}:`, error);
     }
   }
+  async handleFileRename(oldPath, newPath) {
+    console.log(`\uD83D\uDCDD Handling file rename: ${oldPath} → ${newPath}`);
+    try {
+      if (!this.syncStateManager) {
+        console.warn("  ⚠️ No sync state manager available");
+        return;
+      }
+      const remoteFileId = this.syncStateManager.getRemoteFileId(oldPath);
+      if (remoteFileId && this.syncAgentId) {
+        await this.tombstoneManager.addTombstone(remoteFileId, oldPath, this.syncAgentId);
+        console.log(`  \uD83D\uDCCC Added tombstone for old path: ${oldPath}`);
+      }
+      this.syncStateManager.removeFile(oldPath);
+      console.log(`  \uD83D\uDDD1️ Removed old path from index: ${oldPath}`);
+      const newFile = this.vault.getAbstractFileByPath(newPath);
+      if (newFile instanceof import_obsidian3.TFile) {
+        await this.uploadSingleFile(newFile);
+        console.log(`  ✅ Uploaded file with new path: ${newPath}`);
+      } else {
+        console.warn(`  ⚠️ New file not found: ${newPath}`);
+      }
+    } catch (error) {
+      console.error(`  ❌ Failed to handle file rename from ${oldPath} to ${newPath}:`, error);
+    }
+  }
   async handleFolderRename(oldPath, newPath) {
     console.log(`\uD83D\uDCDD Handling folder rename: ${oldPath} → ${newPath}`);
     try {
@@ -2510,7 +2535,17 @@ class VyncPlugin extends import_obsidian6.Plugin {
           }
         } else {
           console.log(`File ${change.changeType}: ${change.filePath}`);
-          this.pendingChanges.add(change.filePath);
+          if (change.changeType === "created" && change.oldPath && this.syncService && this.settings.autoSync) {
+            console.log(`  \uD83D\uDCDD File renamed: ${change.oldPath} → ${change.filePath}`);
+            try {
+              await this.syncService.handleFileRename(change.oldPath, change.filePath);
+              await this.saveSyncState();
+            } catch (error) {
+              console.error(`Failed to handle file rename:`, error);
+            }
+          } else {
+            this.pendingChanges.add(change.filePath);
+          }
         }
         if (this.settings.autoSync && this.pendingChanges.size > 0) {
           this.debouncedSync();
