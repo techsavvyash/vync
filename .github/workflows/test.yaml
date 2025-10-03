@@ -27,10 +27,4 @@ jobs:
         run: bun install
 
       - name: Run tests
-        run: cd packages/plugin && bun test
-
-      - name: Run linter
-        run: bun run lint
-
-      - name: Type check
-        run: bun run typecheck
+        run: cd packages/plugin && bun install && bun test

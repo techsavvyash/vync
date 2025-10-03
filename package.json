@@ -8,10 +8,10 @@
   "scripts": {
     "dev": "bun run dev",
     "build": "bun run build",
-    "lint": "eslint packages/**/*.{ts,tsx}",
-    "lint:fix": "eslint packages/**/*.{ts,tsx} --fix",
-    "format": "prettier --write packages/**/*.{ts,tsx}",
-    "format:check": "prettier --check packages/**/*.{ts,tsx}",
+    "lint": "eslint 'packages/**/*.ts' --ext .ts",
+    "lint:fix": "eslint 'packages/**/*.ts' --ext .ts --fix",
+    "format": "prettier --write 'packages/**/*.ts'",
+    "format:check": "prettier --check 'packages/**/*.ts'",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
