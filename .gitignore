@@ -9,6 +9,7 @@ build/
 # Environment variables
 .env
 .env.local
+!.env.example
 
 # Logs
 *.log
@@ -32,3 +33,7 @@ Thumbs.db
 test-obsidian-vault/
 test-vault/
 **/*/coverage/
+
+credentials.json
+oauth-tokens.json
+vaults/

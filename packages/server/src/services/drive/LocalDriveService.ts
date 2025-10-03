@@ -12,11 +12,15 @@ import {
 
 export class LocalDriveService implements IDriveService {
   private storagePath: string
-  private fileIndex: Map<string, DriveFile> = new Map()
+  private fileIndex: Map<string, DriveFile & { vaultId: string }> = new Map()
 
   constructor(storagePath: string = './local-storage') {
     this.storagePath = path.resolve(storagePath)
     this.initializeStorage()
+  }
+
+  private getVaultPath(vaultId: string): string {
+    return path.join(this.storagePath, 'vaults', vaultId)
   }
 
   private async initializeStorage(): Promise<void> {
@@ -83,31 +87,39 @@ export class LocalDriveService implements IDriveService {
     fileName: string,
     fileData: Buffer,
     mimeType: string,
-    folderId?: string
+    vaultId?: string
   ): Promise<UploadResult> {
     try {
+      if (!vaultId) {
+        return {
+          success: false,
+          error: 'Vault ID is required for upload'
+        }
+      }
+
       // Generate unique file ID
       const fileId = crypto.randomUUID()
       const timestamp = new Date().toISOString()
 
-      // Create file path
-      const folderPath = folderId ? path.join(this.storagePath, folderId) : this.storagePath
-      await fs.mkdir(folderPath, { recursive: true })
+      // Create vault-specific path
+      const vaultPath = this.getVaultPath(vaultId)
+      await fs.mkdir(vaultPath, { recursive: true })
 
-      const filePath = path.join(folderPath, `${fileId}_${fileName}`)
+      const filePath = path.join(vaultPath, `${fileId}_${fileName}`)
 
       // Write file
       await fs.writeFile(filePath, fileData)
 
-      // Create file metadata
-      const file: DriveFile = {
+      // Create file metadata with vaultId
+      const file: DriveFile & { vaultId: string } = {
         id: fileId,
         name: fileName,
         mimeType,
         size: fileData.length,
         modifiedTime: timestamp,
         webContentLink: `file://${filePath}`,
-        webViewLink: `file://${filePath}`
+        webViewLink: `file://${filePath}`,
+        vaultId
       }
 
       // Add to index
@@ -137,8 +149,9 @@ export class LocalDriveService implements IDriveService {
         }
       }
 
-      // Find the actual file path
-      const files = await fs.readdir(this.storagePath)
+      // Find the actual file path in vault-specific folder
+      const vaultPath = this.getVaultPath(file.vaultId)
+      const files = await fs.readdir(vaultPath)
       const fileName = files.find(f => f.startsWith(`${fileId}_`))
 
       if (!fileName) {
@@ -148,7 +161,7 @@ export class LocalDriveService implements IDriveService {
         }
       }
 
-      const filePath = path.join(this.storagePath, fileName)
+      const filePath = path.join(vaultPath, fileName)
       const data = await fs.readFile(filePath)
 
       return {
@@ -164,44 +177,24 @@ export class LocalDriveService implements IDriveService {
     }
   }
 
-  public async listFiles(folderId?: string): Promise<ListResult> {
+  public async listFiles(vaultId?: string): Promise<ListResult> {
     try {
       const files: DriveFile[] = []
 
-      if (folderId) {
-        // List files in specific folder
-        const folderPath = path.join(this.storagePath, folderId)
-        try {
-          const folderFiles = await fs.readdir(folderPath)
-          for (const fileName of folderFiles) {
-            if (fileName === 'index.json') continue
-
-            const filePath = path.join(folderPath, fileName)
-            const stats = await fs.stat(filePath)
-
-            // Extract file ID from filename
-            const fileId = fileName.split('_')[0]
-            const originalName = fileName.substring(fileId.length + 1)
-
-            const file: DriveFile = {
-              id: fileId,
-              name: originalName,
-              mimeType: this.getMimeType(originalName),
-              size: stats.size,
-              modifiedTime: stats.mtime.toISOString(),
-              webContentLink: `file://${filePath}`,
-              webViewLink: `file://${filePath}`
-            }
-
-            files.push(file)
-          }
-        } catch (error) {
-          // Folder doesn't exist
-          console.log(`Folder ${folderId} not found`)
-        }
+      if (vaultId) {
+        // List files for specific vault only
+        const allFiles = Array.from(this.fileIndex.values())
+        files.push(...allFiles.filter(f => f.vaultId === vaultId).map(f => {
+          // Remove vaultId from returned files (it's internal metadata)
+          const { vaultId: _, ...file } = f
+          return file as DriveFile
+        }))
       } else {
-        // List all files from index
-        files.push(...Array.from(this.fileIndex.values()))
+        // List all files from all vaults (for admin purposes)
+        files.push(...Array.from(this.fileIndex.values()).map(f => {
+          const { vaultId: _, ...file } = f
+          return file as DriveFile
+        }))
       }
 
       // Sort by modified time (newest first)
@@ -230,12 +223,13 @@ export class LocalDriveService implements IDriveService {
         }
       }
 
-      // Find and delete the actual file
-      const files = await fs.readdir(this.storagePath)
+      // Find and delete the actual file from vault-specific folder
+      const vaultPath = this.getVaultPath(file.vaultId)
+      const files = await fs.readdir(vaultPath)
       const fileName = files.find(f => f.startsWith(`${fileId}_`))
 
       if (fileName) {
-        const filePath = path.join(this.storagePath, fileName)
+        const filePath = path.join(vaultPath, fileName)
         await fs.unlink(filePath)
       }
 
@@ -257,17 +251,20 @@ export class LocalDriveService implements IDriveService {
 
   public async getFileMetadata(fileId: string): Promise<{ success: boolean; file?: DriveFile; error?: string }> {
     try {
-      const file = this.fileIndex.get(fileId)
-      if (!file) {
+      const fileWithVault = this.fileIndex.get(fileId)
+      if (!fileWithVault) {
         return {
           success: false,
           error: 'File not found'
         }
       }
 
+      // Remove vaultId from returned file
+      const { vaultId: _, ...file } = fileWithVault
+
       return {
         success: true,
-        file
+        file: file as DriveFile
       }
     } catch (error) {
       console.error('Error getting file metadata from local storage:', error)

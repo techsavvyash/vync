@@ -1,6 +1,4 @@
-import { promises as fs } from 'fs'
-import path from 'path'
-import crypto from 'crypto'
+import { Vault, TFile, TFolder, TAbstractFile, EventRef } from 'obsidian'
 
 export interface VaultFileChange {
 	filePath: string
@@ -8,6 +6,8 @@ export interface VaultFileChange {
 	timestamp: number
 	hash?: string
 	size?: number
+	isFolder?: boolean
+	oldPath?: string // For renames
 }
 
 export interface VaultFile {
@@ -19,145 +19,124 @@ export interface VaultFile {
 }
 
 export class VaultWatcherService {
-	private vaultPath: string
-	private watchedFiles: Map<string, VaultFile> = new Map()
+	private vault: Vault
 	private changeCallbacks: ((change: VaultFileChange) => void)[] = []
 	private isWatching: boolean = false
-	private watchTimer: NodeJS.Timeout | null = null
+	private eventRefs: EventRef[] = []
 
-	constructor(vaultPath: string) {
-		this.vaultPath = vaultPath
+	constructor(vault: Vault) {
+		this.vault = vault
 	}
 
 	async startWatching(): Promise<void> {
 		if (this.isWatching) return
 
 		this.isWatching = true
-		console.log(`Starting vault watcher for: ${this.vaultPath}`)
+		console.log('Starting vault watcher using Obsidian API')
 
-		// Initial scan
-		await this.initialScan()
+		// Listen for file/folder creation
+		const createRef = this.vault.on('create', (file: TAbstractFile) => {
+			if (file instanceof TFile && this.isRelevantFile(file.name)) {
+				this.notifyChange({
+					filePath: file.path,
+					changeType: 'created',
+					timestamp: Date.now(),
+					size: file.stat.size,
+					isFolder: false
+				})
+			} else if (file instanceof TFolder) {
+				this.notifyChange({
+					filePath: file.path,
+					changeType: 'created',
+					timestamp: Date.now(),
+					isFolder: true
+				})
+			}
+		})
+		this.eventRefs.push(createRef)
 
-		// Set up periodic checking
-		this.watchTimer = setInterval(() => {
-			this.checkForChanges()
-		}, 2000) // Check every 2 seconds
+		// Listen for file modification
+		const modifyRef = this.vault.on('modify', (file: TAbstractFile) => {
+			if (file instanceof TFile && this.isRelevantFile(file.name)) {
+				this.notifyChange({
+					filePath: file.path,
+					changeType: 'modified',
+					timestamp: Date.now(),
+					size: file.stat.size
+				})
+			}
+		})
+		this.eventRefs.push(modifyRef)
+
+		// Listen for file/folder deletion
+		const deleteRef = this.vault.on('delete', (file: TAbstractFile) => {
+			if (file instanceof TFile && this.isRelevantFile(file.name)) {
+				this.notifyChange({
+					filePath: file.path,
+					changeType: 'deleted',
+					timestamp: Date.now(),
+					isFolder: false
+				})
+			} else if (file instanceof TFolder) {
+				this.notifyChange({
+					filePath: file.path,
+					changeType: 'deleted',
+					timestamp: Date.now(),
+					isFolder: true
+				})
+			}
+		})
+		this.eventRefs.push(deleteRef)
+
+		// Listen for file/folder rename
+		const renameRef = this.vault.on('rename', (file: TAbstractFile, oldPath: string) => {
+			if (file instanceof TFile && this.isRelevantFile(file.name)) {
+				// Notify old path as deleted
+				this.notifyChange({
+					filePath: oldPath,
+					changeType: 'deleted',
+					timestamp: Date.now(),
+					isFolder: false,
+					oldPath: oldPath
+				})
+				// Notify new path as created
+				this.notifyChange({
+					filePath: file.path,
+					changeType: 'created',
+					timestamp: Date.now(),
+					size: file.stat.size,
+					isFolder: false,
+					oldPath: oldPath
+				})
+			} else if (file instanceof TFolder) {
+				// Folder renamed - notify with oldPath for tracking
+				console.log(`📁 Folder renamed: ${oldPath} → ${file.path}`)
+				this.notifyChange({
+					filePath: file.path,
+					changeType: 'created', // Use 'created' with oldPath to indicate rename
+					timestamp: Date.now(),
+					isFolder: true,
+					oldPath: oldPath
+				})
+			}
+		})
+		this.eventRefs.push(renameRef)
+
+		console.log('Vault watcher started successfully')
 	}
 
 	stopWatching(): void {
-		if (this.watchTimer) {
-			clearInterval(this.watchTimer)
-			this.watchTimer = null
+		// Unregister all event listeners
+		for (const ref of this.eventRefs) {
+			this.vault.offref(ref)
 		}
+		this.eventRefs = []
 		this.isWatching = false
-		this.watchedFiles.clear()
 		console.log('Vault watcher stopped')
 	}
 
 	onChange(callback: (change: VaultFileChange) => void): void {
 		this.changeCallbacks.push(callback)
-	}
-
-	private async initialScan(): Promise<void> {
-		try {
-			const files = await this.scanDirectory(this.vaultPath)
-			for (const file of files) {
-				this.watchedFiles.set(file.path, file)
-			}
-			console.log(`Initial scan complete: ${files.length} files found`)
-		} catch (error) {
-			console.error('Error during initial scan:', error)
-		}
-	}
-
-	private async scanDirectory(dirPath: string): Promise<VaultFile[]> {
-		const files: VaultFile[] = []
-
-		try {
-			const entries = await fs.readdir(dirPath, { withFileTypes: true })
-
-			for (const entry of entries) {
-				const fullPath = path.join(dirPath, entry.name)
-				const relativePath = path.relative(this.vaultPath, fullPath)
-
-				if (entry.name.startsWith('.')) continue
-
-				if (entry.isDirectory()) {
-					const subFiles = await this.scanDirectory(fullPath)
-					files.push(...subFiles)
-				} else if (entry.isFile() && this.isRelevantFile(entry.name)) {
-					try {
-						const fileInfo = await this.getFileInfo(fullPath, relativePath)
-						files.push(fileInfo)
-					} catch (error) {
-						console.warn(`Failed to get info for ${fullPath}:`, error)
-					}
-				}
-			}
-		} catch (error) {
-			console.error(`Error scanning directory ${dirPath}:`, error)
-		}
-
-		return files
-	}
-
-	private async getFileInfo(fullPath: string, relativePath: string): Promise<VaultFile> {
-		const stats = await fs.stat(fullPath)
-		const content = await fs.readFile(fullPath, 'utf8')
-		const hash = crypto.createHash('md5').update(content).digest('hex')
-
-		return {
-			path: relativePath,
-			name: path.basename(relativePath),
-			size: stats.size,
-			mtime: stats.mtime.getTime(),
-			hash
-		}
-	}
-
-	private async checkForChanges(): Promise<void> {
-		try {
-			const currentFiles = await this.scanDirectory(this.vaultPath)
-			const currentFileMap = new Map(currentFiles.map(f => [f.path, f]))
-
-			// Check for new and modified files
-			for (const currentFile of currentFiles) {
-				const previousFile = this.watchedFiles.get(currentFile.path)
-
-				if (!previousFile) {
-					this.notifyChange({
-						filePath: currentFile.path,
-						changeType: 'created',
-						timestamp: Date.now(),
-						hash: currentFile.hash,
-						size: currentFile.size
-					})
-				} else if (previousFile.hash !== currentFile.hash) {
-					this.notifyChange({
-						filePath: currentFile.path,
-						changeType: 'modified',
-						timestamp: Date.now(),
-						hash: currentFile.hash,
-						size: currentFile.size
-					})
-				}
-			}
-
-			// Check for deleted files
-			for (const [filePath] of this.watchedFiles) {
-				if (!currentFileMap.has(filePath)) {
-					this.notifyChange({
-						filePath,
-						changeType: 'deleted',
-						timestamp: Date.now()
-					})
-				}
-			}
-
-			this.watchedFiles = currentFileMap
-		} catch (error) {
-			console.error('Error checking for changes:', error)
-		}
 	}
 
 	private notifyChange(change: VaultFileChange): void {
@@ -171,12 +150,14 @@ export class VaultWatcherService {
 	}
 
 	private isRelevantFile(fileName: string): boolean {
-		const relevantExtensions = ['.md', '.txt', '.pdf', '.png', '.jpg', '.jpeg']
-		const extension = path.extname(fileName).toLowerCase()
+		const relevantExtensions = ['.md', '.txt', '.pdf', '.png', '.jpg', '.jpeg', '.gif', '.svg']
+		const extension = fileName.substring(fileName.lastIndexOf('.')).toLowerCase()
 		return relevantExtensions.includes(extension)
 	}
 
 	getWatchedFileCount(): number {
-		return this.watchedFiles.size
+		// Return count of files in vault
+		const files = this.vault.getFiles()
+		return files.filter(f => this.isRelevantFile(f.name)).length
 	}
 }

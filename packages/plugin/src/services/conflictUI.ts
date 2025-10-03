@@ -1,3 +1,6 @@
+import { App, Modal, Setting, Notice } from 'obsidian'
+import { SyncService } from './syncService'
+
 export interface Conflict {
 	id: string
 	filePath: string
@@ -23,8 +26,15 @@ export interface ConflictResolutionResult {
 }
 
 export class ConflictUIService {
+	private app: App
+	private syncService: SyncService
 	private conflicts: Map<string, Conflict> = new Map()
 	private resolutionCallbacks: ((result: ConflictResolutionResult) => void)[] = []
+
+	constructor(app: App, syncService: SyncService) {
+		this.app = app
+		this.syncService = syncService
+	}
 
 	onResolution(callback: (result: ConflictResolutionResult) => void): void {
 		this.resolutionCallbacks.push(callback)
@@ -86,17 +96,16 @@ export class ConflictUIService {
 	}
 
 	private displayConflictNotification(conflict: Conflict): void {
-		// Since we don't have access to Obsidian's UI components,
-		// we'll use console output and basic prompts
 		console.log('\n=== CONFLICT DETECTED ===')
 		console.log(`File: ${conflict.filePath}`)
 		console.log(`Local version: ${conflict.localVersion.size} bytes, modified: ${new Date(conflict.localVersion.lastModified).toLocaleString()}`)
 		console.log(`Remote version: ${conflict.remoteVersion.size} bytes, modified: ${new Date(conflict.remoteVersion.lastModified).toLocaleString()}`)
 		console.log('========================\n')
 
-		// In a real implementation, this would show a modal dialog
-		// For now, we'll auto-resolve based on the default strategy
-		this.autoResolveConflict(conflict)
+		// Show modal for conflict resolution
+		new ConflictResolutionModal(this.app, conflict, (resolution, content) => {
+			this.resolveConflict(conflict.id, resolution, content)
+		}).open()
 	}
 
 	private async autoResolveConflict(conflict: Conflict): Promise<void> {
@@ -177,5 +186,92 @@ ${remoteContent}
 	clearConflicts(): void {
 		this.conflicts.clear()
 		console.log('All conflicts cleared')
+	}
+}
+
+// Modal for conflict resolution
+class ConflictResolutionModal extends Modal {
+	private conflict: Conflict
+	private onChoose: (resolution: ConflictResolution, content?: string) => void
+
+	constructor(app: App, conflict: Conflict, onChoose: (resolution: ConflictResolution, content?: string) => void) {
+		super(app)
+		this.conflict = conflict
+		this.onChoose = onChoose
+	}
+
+	onOpen() {
+		const { contentEl } = this
+
+		contentEl.createEl('h2', { text: 'Sync Conflict Detected' })
+
+		contentEl.createEl('p', {
+			text: `A conflict was detected in: ${this.conflict.filePath}`,
+			cls: 'conflict-file-path'
+		})
+
+		// Local version info
+		const localDiv = contentEl.createDiv({ cls: 'conflict-version' })
+		localDiv.createEl('h3', { text: 'Local Version' })
+		localDiv.createEl('p', { text: `Size: ${this.conflict.localVersion.size} bytes` })
+		localDiv.createEl('p', {
+			text: `Modified: ${new Date(this.conflict.localVersion.lastModified).toLocaleString()}`
+		})
+
+		// Remote version info
+		const remoteDiv = contentEl.createDiv({ cls: 'conflict-version' })
+		remoteDiv.createEl('h3', { text: 'Remote Version' })
+		remoteDiv.createEl('p', { text: `Size: ${this.conflict.remoteVersion.size} bytes` })
+		remoteDiv.createEl('p', {
+			text: `Modified: ${new Date(this.conflict.remoteVersion.lastModified).toLocaleString()}`
+		})
+
+		// Action buttons
+		const buttonContainer = contentEl.createDiv({ cls: 'conflict-buttons' })
+
+		// Keep local button
+		new Setting(buttonContainer)
+			.addButton(button => button
+				.setButtonText('Keep Local')
+				.onClick(() => {
+					this.onChoose('local')
+					this.close()
+				}))
+
+		// Keep remote button
+		new Setting(buttonContainer)
+			.addButton(button => button
+				.setButtonText('Keep Remote')
+				.onClick(() => {
+					this.onChoose('remote')
+					this.close()
+				}))
+
+		// Keep both (merge) button
+		new Setting(buttonContainer)
+			.addButton(button => button
+				.setButtonText('Keep Both (Merge)')
+				.setWarning()
+				.onClick(() => {
+					const merged = this.mergeContent(
+						this.conflict.localVersion.content,
+						this.conflict.remoteVersion.content
+					)
+					this.onChoose('manual', merged)
+					this.close()
+				}))
+	}
+
+	onClose() {
+		const { contentEl } = this
+		contentEl.empty()
+	}
+
+	private mergeContent(localContent: string, remoteContent: string): string {
+		return `<<<<<<< LOCAL VERSION
+${localContent}
+=======
+${remoteContent}
+>>>>>>> REMOTE VERSION`
 	}
 }
