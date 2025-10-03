@@ -135,4 +135,86 @@ export class GoogleDriveService {
       return false
     }
   }
+
+  public async createFolder(folderName: string, parentFolderId?: string): Promise<string | null> {
+    if (!this.drive) {
+      throw new Error('Google Drive not authenticated')
+    }
+
+    try {
+      const fileMetadata: any = {
+        name: folderName,
+        mimeType: 'application/vnd.google-apps.folder'
+      }
+
+      if (parentFolderId) {
+        fileMetadata.parents = [parentFolderId]
+      }
+
+      const response = await this.drive.files.create({
+        requestBody: fileMetadata,
+        fields: 'id'
+      })
+
+      return response.data.id || null
+    } catch (error) {
+      console.error('Error creating folder in Google Drive:', error)
+      return null
+    }
+  }
+
+  public async findFolder(folderPath: string, parentFolderId?: string): Promise<string | null> {
+    if (!this.drive) {
+      throw new Error('Google Drive not authenticated')
+    }
+
+    try {
+      // Split the path and find/create folders recursively
+      const parts = folderPath.split('/').filter(p => p)
+
+      if (parts.length === 0) {
+        return parentFolderId || null
+      }
+
+      const folderName = parts[0]
+      const remainingPath = parts.slice(1).join('/')
+
+      // Search for existing folder
+      let query = `name='${folderName}' and mimeType='application/vnd.google-apps.folder' and trashed=false`
+      if (parentFolderId) {
+        query += ` and '${parentFolderId}' in parents`
+      }
+
+      const response = await this.drive.files.list({
+        q: query,
+        fields: 'files(id, name)',
+        spaces: 'drive'
+      })
+
+      let folderId: string | null = null
+
+      if (response.data.files && response.data.files.length > 0) {
+        // Folder exists
+        folderId = response.data.files[0].id || null
+      } else {
+        // Create the folder
+        folderId = await this.createFolder(folderName, parentFolderId)
+      }
+
+      // If there's more path to process, continue recursively
+      if (folderId && remainingPath) {
+        return await this.findFolder(remainingPath, folderId)
+      }
+
+      return folderId
+    } catch (error) {
+      console.error('Error finding/creating folder in Google Drive:', error)
+      return null
+    }
+  }
+
+  public async ensureFolderPath(folderPath: string): Promise<string | null> {
+    // This method ensures the entire folder path exists, creating folders as needed
+    return await this.findFolder(folderPath)
+  }
 }

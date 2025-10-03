@@ -329,6 +329,20 @@ export class SyncService {
 		return hashArray.map(b => b.toString(16).padStart(2, '0')).join('')
 	}
 
+	// Helper function to convert binary data to base64 without stack overflow
+	private arrayBufferToBase64(buffer: ArrayBuffer): string {
+		const bytes = new Uint8Array(buffer)
+		const chunkSize = 0x8000 // 32KB chunks to avoid stack overflow
+		let binary = ''
+
+		for (let i = 0; i < bytes.length; i += chunkSize) {
+			const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length))
+			binary += String.fromCharCode.apply(null, Array.from(chunk))
+		}
+
+		return btoa(binary)
+	}
+
 	private async uploadFiles(files: SyncFile[]): Promise<any[]> {
 		const results: any[] = []
 
@@ -337,9 +351,8 @@ export class SyncService {
 				// Convert content to base64 for transmission
 				let fileData: string
 				if (file.isBinary) {
-					// Convert ArrayBuffer to base64
-					const bytes = new Uint8Array(file.content as ArrayBuffer)
-					fileData = btoa(String.fromCharCode(...bytes))
+					// Convert ArrayBuffer to base64 using chunked approach
+					fileData = this.arrayBufferToBase64(file.content as ArrayBuffer)
 				} else {
 					// Text content - encode to base64 for consistency
 					fileData = btoa(unescape(encodeURIComponent(file.content as string)))
@@ -844,10 +857,88 @@ export class SyncService {
 		}
 	}
 
+	// Method to handle folder creation events
+	async handleFolderCreation(folderPath: string): Promise<void> {
+		console.log(`📁 Handling folder creation: ${folderPath}`)
+
+		try {
+			if (this.syncStateManager) {
+				// Get folder metadata
+				const metadata = await this.vaultScanner.getFileMetadata(folderPath)
+
+				if (metadata && metadata.isFolder) {
+					// Track folder in index
+					this.syncStateManager.trackFolder(
+						folderPath,
+						metadata.mtime,
+						0, // File count will be updated separately
+						0, // Subfolder count will be updated separately
+						undefined // No remote ID yet - will be assigned when files are uploaded
+					)
+					console.log(`  ✅ Added folder to sync index: ${folderPath}`)
+
+					// Note: The actual folder creation in Google Drive happens automatically
+					// when files are uploaded with the folder path
+				}
+			}
+		} catch (error) {
+			console.error(`  ❌ Failed to handle folder creation for ${folderPath}:`, error)
+		}
+	}
+
+	// Method to handle folder deletion events
+	async handleFolderDeletion(folderPath: string): Promise<void> {
+		console.log(`🗑️ Handling folder deletion: ${folderPath}`)
+
+		try {
+			if (this.syncStateManager) {
+				// Remove folder from index
+				this.syncStateManager.removeFolder(folderPath)
+				console.log(`  ✅ Removed folder from sync index: ${folderPath}`)
+
+				// Also remove all files within the folder from the index
+				const files = this.syncStateManager.getState().files
+				const filesToRemove: string[] = []
+
+				files.forEach((fileState, filePath) => {
+					if (filePath.startsWith(folderPath + '/')) {
+						filesToRemove.push(filePath)
+					}
+				})
+
+				for (const filePath of filesToRemove) {
+					this.syncStateManager.removeFile(filePath)
+					console.log(`  ✅ Removed file from sync index: ${filePath}`)
+				}
+
+				// TODO: Also delete from Google Drive if needed
+			}
+		} catch (error) {
+			console.error(`  ❌ Failed to handle folder deletion for ${folderPath}:`, error)
+		}
+	}
+
+	// Method to handle folder rename events
+	async handleFolderRename(oldPath: string, newPath: string): Promise<void> {
+		console.log(`📝 Handling folder rename: ${oldPath} → ${newPath}`)
+
+		try {
+			if (this.syncStateManager) {
+				// Rename folder in index
+				this.syncStateManager.renameFolder(oldPath, newPath)
+				console.log(`  ✅ Updated folder path in sync index`)
+
+				// The syncStateManager.renameFolder method already handles updating all child files
+			}
+		} catch (error) {
+			console.error(`  ❌ Failed to handle folder rename from ${oldPath} to ${newPath}:`, error)
+		}
+	}
+
 	// Method to reconcile index with actual vault files
 	// This ensures any files created outside of Obsidian events are tracked
 	async reconcileIndex(): Promise<number> {
-		console.log('🔍 Reconciling sync index with vault files...')
+		console.log('🔍 Reconciling sync index with vault files and folders...')
 
 		if (!this.syncStateManager) {
 			console.warn('  ⚠️ No sync state manager available')
@@ -855,19 +946,35 @@ export class SyncService {
 		}
 
 		try {
-			// Scan vault for all relevant files
+			// Scan vault for all relevant files AND folders
 			const vaultFiles = await this.vaultScanner.scanVault({
 				includeExtensions: ['.md', '.txt', '.pdf', '.png', '.jpg', '.jpeg', '.gif', '.svg'],
 				recursive: true
 			})
 
 			const currentIndex = this.syncStateManager.getState().files
+			const folderIndex = this.syncStateManager.getState().folders
 			let newFilesFound = 0
+			let newFoldersFound = 0
 			let staleEntriesRemoved = 0
 
-			// Check for files in vault but not in index
-			for (const vaultFile of vaultFiles) {
-				if (vaultFile.isFolder) continue
+			// Process folders first to ensure directory structure exists
+			for (const vaultItem of vaultFiles) {
+				if (vaultItem.isFolder) {
+					// Track folder in index
+					if (!folderIndex.has(vaultItem.path)) {
+						console.log(`  📁 Found untracked folder: ${vaultItem.path}`)
+						this.syncStateManager.trackFolder(
+							vaultItem.path,
+							vaultItem.mtime,
+							0, // Will be updated later
+							0, // Will be updated later
+							undefined // No remote ID yet
+						)
+						newFoldersFound++
+					}
+					continue
+				}
 
 				if (!currentIndex.has(vaultFile.path)) {
 					console.log(`  📄 Found untracked file: ${vaultFile.path}`)
@@ -918,9 +1025,10 @@ export class SyncService {
 				}
 			}
 
-			if (newFilesFound > 0 || staleEntriesRemoved > 0) {
+			if (newFilesFound > 0 || newFoldersFound > 0 || staleEntriesRemoved > 0) {
 				console.log(`✅ Index reconciliation complete:`)
 				console.log(`   - ${newFilesFound} new file(s) added to index`)
+				console.log(`   - ${newFoldersFound} new folder(s) tracked`)
 				console.log(`   - ${staleEntriesRemoved} stale entries removed`)
 			} else {
 				console.log('✅ Index is in sync with vault')
@@ -942,8 +1050,8 @@ export class SyncService {
 		// Convert content to base64
 		let fileData: string
 		if (isBinary) {
-			const bytes = new Uint8Array(content as ArrayBuffer)
-			fileData = btoa(String.fromCharCode(...bytes))
+			// Use chunked approach to avoid stack overflow with large files
+			fileData = this.arrayBufferToBase64(content as ArrayBuffer)
 		} else {
 			fileData = btoa(unescape(encodeURIComponent(content as string)))
 		}

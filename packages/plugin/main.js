@@ -330,13 +330,13 @@ class SyncService {
         recursive: true
       });
       let newFilesFound = 0;
-      for (const vaultFile of vaultFiles) {
-        if (vaultFile.isFolder)
+      for (const vaultFile2 of vaultFiles) {
+        if (vaultFile2.isFolder)
           continue;
-        if (!validLocalFiles.has(vaultFile.path)) {
-          console.log(`  \uD83D\uDCC4 Found new file: ${vaultFile.path}`);
-          validLocalFiles.set(vaultFile.path, {
-            path: vaultFile.path,
+        if (!validLocalFiles.has(vaultFile2.path)) {
+          console.log(`  \uD83D\uDCC4 Found new file: ${vaultFile2.path}`);
+          validLocalFiles.set(vaultFile2.path, {
+            path: vaultFile2.path,
             lastSyncedHash: "",
             lastSyncedTime: 0,
             lastSyncedSize: 0,
@@ -533,14 +533,23 @@ class SyncService {
     const hashArray = Array.from(new Uint8Array(hashBuffer));
     return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
   }
+  arrayBufferToBase64(buffer) {
+    const bytes = new Uint8Array(buffer);
+    const chunkSize = 32768;
+    let binary = "";
+    for (let i = 0;i < bytes.length; i += chunkSize) {
+      const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+      binary += String.fromCharCode.apply(null, Array.from(chunk));
+    }
+    return btoa(binary);
+  }
   async uploadFiles(files) {
     const results = [];
     for (const file of files) {
       try {
         let fileData;
         if (file.isBinary) {
-          const bytes = new Uint8Array(file.content);
-          fileData = btoa(String.fromCharCode(...bytes));
+          fileData = this.arrayBufferToBase64(file.content);
         } else {
           fileData = btoa(unescape(encodeURIComponent(file.content)));
         }
@@ -914,8 +923,55 @@ class SyncService {
       console.error(`  ❌ Failed to handle file deletion for ${filePath}:`, error);
     }
   }
+  async handleFolderCreation(folderPath) {
+    console.log(`\uD83D\uDCC1 Handling folder creation: ${folderPath}`);
+    try {
+      if (this.syncStateManager) {
+        const metadata = await this.vaultScanner.getFileMetadata(folderPath);
+        if (metadata && metadata.isFolder) {
+          this.syncStateManager.trackFolder(folderPath, metadata.mtime, 0, 0, undefined);
+          console.log(`  ✅ Added folder to sync index: ${folderPath}`);
+        }
+      }
+    } catch (error) {
+      console.error(`  ❌ Failed to handle folder creation for ${folderPath}:`, error);
+    }
+  }
+  async handleFolderDeletion(folderPath) {
+    console.log(`\uD83D\uDDD1️ Handling folder deletion: ${folderPath}`);
+    try {
+      if (this.syncStateManager) {
+        this.syncStateManager.removeFolder(folderPath);
+        console.log(`  ✅ Removed folder from sync index: ${folderPath}`);
+        const files = this.syncStateManager.getState().files;
+        const filesToRemove = [];
+        files.forEach((fileState, filePath) => {
+          if (filePath.startsWith(folderPath + "/")) {
+            filesToRemove.push(filePath);
+          }
+        });
+        for (const filePath of filesToRemove) {
+          this.syncStateManager.removeFile(filePath);
+          console.log(`  ✅ Removed file from sync index: ${filePath}`);
+        }
+      }
+    } catch (error) {
+      console.error(`  ❌ Failed to handle folder deletion for ${folderPath}:`, error);
+    }
+  }
+  async handleFolderRename(oldPath, newPath) {
+    console.log(`\uD83D\uDCDD Handling folder rename: ${oldPath} → ${newPath}`);
+    try {
+      if (this.syncStateManager) {
+        this.syncStateManager.renameFolder(oldPath, newPath);
+        console.log(`  ✅ Updated folder path in sync index`);
+      }
+    } catch (error) {
+      console.error(`  ❌ Failed to handle folder rename from ${oldPath} to ${newPath}:`, error);
+    }
+  }
   async reconcileIndex() {
-    console.log("\uD83D\uDD0D Reconciling sync index with vault files...");
+    console.log("\uD83D\uDD0D Reconciling sync index with vault files and folders...");
     if (!this.syncStateManager) {
       console.warn("  ⚠️ No sync state manager available");
       return 0;
@@ -926,11 +982,19 @@ class SyncService {
         recursive: true
       });
       const currentIndex = this.syncStateManager.getState().files;
+      const folderIndex = this.syncStateManager.getState().folders;
       let newFilesFound = 0;
+      let newFoldersFound = 0;
       let staleEntriesRemoved = 0;
-      for (const vaultFile of vaultFiles) {
-        if (vaultFile.isFolder)
+      for (const vaultItem of vaultFiles) {
+        if (vaultItem.isFolder) {
+          if (!folderIndex.has(vaultItem.path)) {
+            console.log(`  \uD83D\uDCC1 Found untracked folder: ${vaultItem.path}`);
+            this.syncStateManager.trackFolder(vaultItem.path, vaultItem.mtime, 0, 0, undefined);
+            newFoldersFound++;
+          }
           continue;
+        }
         if (!currentIndex.has(vaultFile.path)) {
           console.log(`  \uD83D\uDCC4 Found untracked file: ${vaultFile.path}`);
           currentIndex.set(vaultFile.path, {
@@ -966,9 +1030,10 @@ class SyncService {
           }
         }
       }
-      if (newFilesFound > 0 || staleEntriesRemoved > 0) {
+      if (newFilesFound > 0 || newFoldersFound > 0 || staleEntriesRemoved > 0) {
         console.log(`✅ Index reconciliation complete:`);
         console.log(`   - ${newFilesFound} new file(s) added to index`);
+        console.log(`   - ${newFoldersFound} new folder(s) tracked`);
         console.log(`   - ${staleEntriesRemoved} stale entries removed`);
       } else {
         console.log("✅ Index is in sync with vault");
@@ -985,8 +1050,7 @@ class SyncService {
     const hash = await this.computeHash(content);
     let fileData;
     if (isBinary) {
-      const bytes = new Uint8Array(content);
-      fileData = btoa(String.fromCharCode(...bytes));
+      fileData = this.arrayBufferToBase64(content);
     } else {
       fileData = btoa(unescape(encodeURIComponent(content)));
     }
@@ -1868,15 +1932,24 @@ class ObsidianSyncPlugin extends import_obsidian4.Plugin {
       this.vaultWatcher.onChange(async (change) => {
         if (change.isFolder) {
           console.log(`Folder ${change.changeType}: ${change.filePath}`);
-          if (change.oldPath && change.changeType === "created") {
-            if (this.syncStateManager) {
-              this.syncStateManager.renameFolder(change.oldPath, change.filePath);
-              await this.saveSyncState();
-            }
-          } else if (change.changeType === "deleted") {
-            if (this.syncStateManager) {
-              this.syncStateManager.removeFolder(change.filePath);
-              await this.saveSyncState();
+          if (this.syncService && this.settings.autoSync) {
+            try {
+              switch (change.changeType) {
+                case "created":
+                  if (change.oldPath) {
+                    await this.syncService.handleFolderRename(change.oldPath, change.filePath);
+                  } else {
+                    await this.syncService.handleFolderCreation(change.filePath);
+                  }
+                  await this.saveSyncState();
+                  break;
+                case "deleted":
+                  await this.syncService.handleFolderDeletion(change.filePath);
+                  await this.saveSyncState();
+                  break;
+              }
+            } catch (error) {
+              console.error(`Failed to handle folder ${change.changeType} for ${change.filePath}:`, error);
             }
           }
         } else {

@@ -254,13 +254,13 @@ export class GoogleDriveService implements IDriveService {
   }
 
   public async uploadFile(
-    fileName: string,
+    filePath: string,
     fileData: Buffer,
     mimeType: string,
     vaultId?: string
   ): Promise<UploadResult> {
     console.log('  🔵 GoogleDriveService.uploadFile() called')
-    console.log('    File name:', fileName)
+    console.log('    File path:', filePath)
     console.log('    MIME type:', mimeType)
     console.log('    Vault ID:', vaultId)
     console.log('    Data size:', fileData.length, 'bytes')
@@ -292,10 +292,23 @@ export class GoogleDriveService implements IDriveService {
         }
       }
 
+      // Parse the file path to get folder path and file name
+      const pathParts = filePath.split('/')
+      const fileName = pathParts.pop() || filePath
+      const folderPath = pathParts.join('/')
+
+      // Get or create the folder structure within the vault folder
+      let targetFolderId = vaultFolderId
+      if (folderPath) {
+        console.log('    📁 Ensuring folder path exists:', folderPath)
+        targetFolderId = await this.ensureFolderPath(folderPath, vaultFolderId) || vaultFolderId
+        console.log('    Target folder ID:', targetFolderId)
+      }
+
       // Check if file already exists in this folder
       console.log('    🔍 Checking for existing file...')
       const existingFileResponse = await this.drive.files.list({
-        q: `name='${fileName}' and '${vaultFolderId}' in parents and trashed=false`,
+        q: `name='${fileName}' and '${targetFolderId}' in parents and trashed=false`,
         fields: 'files(id, name)',
         spaces: 'drive'
       })
@@ -345,7 +358,7 @@ export class GoogleDriveService implements IDriveService {
         const fileMetadata: any = {
           name: fileName,
           mimeType: mimeType,
-          parents: [vaultFolderId]
+          parents: [targetFolderId]
         }
 
         response = await this.drive.files.create({
@@ -571,6 +584,84 @@ export class GoogleDriveService implements IDriveService {
         success: false,
         error: `Get metadata failed: ${error}`
       }
+    }
+  }
+
+  private async createFolder(folderName: string, parentFolderId?: string): Promise<string | null> {
+    if (!this.drive) {
+      return null
+    }
+
+    try {
+      const fileMetadata: any = {
+        name: folderName,
+        mimeType: 'application/vnd.google-apps.folder'
+      }
+
+      if (parentFolderId) {
+        fileMetadata.parents = [parentFolderId]
+      }
+
+      const response = await this.drive.files.create({
+        requestBody: fileMetadata,
+        fields: 'id'
+      })
+
+      console.log(`    📁 Created folder: ${folderName} (ID: ${response.data.id})`)
+      return response.data.id || null
+    } catch (error) {
+      console.error('Error creating folder in Google Drive:', error)
+      return null
+    }
+  }
+
+  private async ensureFolderPath(folderPath: string, parentFolderId: string): Promise<string | null> {
+    if (!this.drive || !folderPath) {
+      return parentFolderId
+    }
+
+    try {
+      // Split the path and create folders recursively
+      const parts = folderPath.split('/').filter(p => p)
+
+      if (parts.length === 0) {
+        return parentFolderId
+      }
+
+      let currentParentId = parentFolderId
+
+      for (const folderName of parts) {
+        // Search for existing folder
+        const query = `name='${folderName}' and mimeType='application/vnd.google-apps.folder' and '${currentParentId}' in parents and trashed=false`
+
+        const response = await this.drive.files.list({
+          q: query,
+          fields: 'files(id, name)',
+          spaces: 'drive'
+        })
+
+        let folderId: string | null = null
+
+        if (response.data.files && response.data.files.length > 0) {
+          // Folder exists
+          folderId = response.data.files[0].id || null
+          console.log(`    📁 Found existing folder: ${folderName} (ID: ${folderId})`)
+        } else {
+          // Create the folder
+          folderId = await this.createFolder(folderName, currentParentId)
+          if (!folderId) {
+            console.error(`    ❌ Failed to create folder: ${folderName}`)
+            return null
+          }
+        }
+
+        currentParentId = folderId
+      }
+
+      return currentParentId
+    } catch (error) {
+      console.error('Error ensuring folder path in Google Drive:', error)
+      return null
     }
   }
 }

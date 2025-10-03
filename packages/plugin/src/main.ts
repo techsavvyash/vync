@@ -141,21 +141,31 @@ export default class ObsidianSyncPlugin extends Plugin {
 			// Set up change listener
 			this.vaultWatcher.onChange(async (change: VaultFileChange) => {
 				if (change.isFolder) {
-					// Handle folder changes
+					// Handle folder changes with immediate sync
 					console.log(`Folder ${change.changeType}: ${change.filePath}`)
 
-					if (change.oldPath && change.changeType === 'created') {
-						// Folder renamed
-						if (this.syncStateManager) {
-							this.syncStateManager.renameFolder(change.oldPath, change.filePath)
-							// Save sync state after folder rename
-							await this.saveSyncState()
-						}
-					} else if (change.changeType === 'deleted') {
-						// Folder deleted
-						if (this.syncStateManager) {
-							this.syncStateManager.removeFolder(change.filePath)
-							await this.saveSyncState()
+					if (this.syncService && this.settings.autoSync) {
+						try {
+							switch (change.changeType) {
+								case 'created':
+									if (change.oldPath) {
+										// This is a rename operation
+										await this.syncService.handleFolderRename(change.oldPath, change.filePath)
+									} else {
+										// New folder created
+										await this.syncService.handleFolderCreation(change.filePath)
+									}
+									await this.saveSyncState()
+									break
+
+								case 'deleted':
+									// Folder deleted
+									await this.syncService.handleFolderDeletion(change.filePath)
+									await this.saveSyncState()
+									break
+							}
+						} catch (error) {
+							console.error(`Failed to handle folder ${change.changeType} for ${change.filePath}:`, error)
 						}
 					}
 				} else {
