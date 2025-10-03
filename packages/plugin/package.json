@@ -1,6 +1,6 @@
 {
-  "name": "@obs-sync/plugin",
-  "version": "1.0.0",
+  "name": "@techsavvyash/obs-sync-plugin",
+  "version": "0.0.1",
   "scripts": {
     "build": "bun build src/main.ts --outdir . --format cjs --external obsidian",
     "dev": "bun build src/main.ts --outdir . --format cjs --external obsidian --watch",

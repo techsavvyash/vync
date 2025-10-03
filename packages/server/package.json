@@ -1,6 +1,6 @@
 {
-  "name": "@obs-sync/server",
-  "version": "1.0.0",
+  "name": "@techsavvyash/obs-sync-server",
+  "version": "0.0.1",
   "scripts": {
     "dev": "bun run src/index.ts",
     "build": "bun build src/index.ts --outdir dist --target node",
