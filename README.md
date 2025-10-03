@@ -2,245 +2,286 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A complete synchronization solution for Obsidian vaults with Google Drive backend, featuring real-time sync, folder structure preservation, and automatic conflict detection.
+<p align="center">
+  <img src="assets/illustration.png" alt="Vync - Obsidian to Google Drive Sync" width="400">
+</p>
+
+A local-first Obsidian plugin for seamless vault synchronization with Google Drive. Direct integration, no server required, complete privacy and control.
 
 ## ✨ Features
 
 - 🔄 **Bi-directional Sync** - Upload and download files between Obsidian and Google Drive
 - 📁 **Folder Preservation** - Maintains complete directory hierarchy in Google Drive
 - ⚡ **Real-time Updates** - Files sync immediately on creation or modification
-- 🔐 **OAuth 2.0 Auth** - Secure Google Drive authentication
-- 🌐 **Remote Deployment** - Works on any hosting platform with auto-detected URLs
-- 🔍 **Index Reconciliation** - Periodic scanning ensures all files are tracked
-- 💾 **Local Storage** - Development mode with local file storage
-- 🚀 **Auto-Detection** - Dynamic configuration for any environment
+- 🔐 **OAuth 2.0 Auth** - Secure Google Drive authentication directly from plugin
+- 💻 **Local-First** - No external server required, runs entirely in Obsidian
+- 🔍 **Smart Sync** - Intelligent change detection and conflict resolution
+- 🗑️ **Tombstone Management** - Proper deletion tracking with grace periods
+- 🔄 **File Rename Detection** - Handles file and folder renames efficiently
 
 ## 🚀 Quick Start
 
-### 1. Clone and Install
+### 1. Install Plugin
+
+#### Option A: From Obsidian Community Plugins
+1. Open Obsidian Settings → Community Plugins
+2. Search for "Vync"
+3. Click Install
+4. Enable the plugin
+
+#### Option B: Manual Installation
 ```bash
+# Clone and build
 git clone <repository-url>
 cd vync
 bun install
-```
 
-### 2. Setup Server
-```bash
-cd packages/server
-cp .env.example .env
-# Edit .env with your configuration
-bun run dev
-```
-
-### 3. Setup Obsidian Plugin
-```bash
+# Build the plugin
 cd packages/plugin
 bun run build
-# Install plugin in Obsidian
+
+# Copy to your vault's plugins folder
+cp -r dist/* /path/to/your/vault/.obsidian/plugins/vync/
 ```
+
+### 2. Configure Google Drive
+1. Open Vync settings in Obsidian
+2. Click "Authenticate with Google Drive"
+3. Complete OAuth flow
+4. Start syncing!
 
 **📖 Detailed guide:** See [QUICK_START.md](QUICK_START.md)
 
 ## 📋 Documentation
 
 ### Getting Started
-- **[Quick Start Guide](QUICK_START.md)** - Get running in 10 minutes
-- **[Environment Setup](packages/server/ENV_SETUP_GUIDE.md)** - Configure environment variables
-- **[Deployment Guide](DEPLOYMENT_GUIDE.md)** - Deploy to production
+- **[Quick Start Guide](QUICK_START.md)** - Get running in 5 minutes
+- **[Google OAuth Setup](docs/OAUTH_SETUP.md)** - Configure Google Drive API
 
 ### Features
+- **[Sync Logic](docs/SYNC_LOGIC.md)** - How the sync algorithm works
 - **[Folder Sync](FOLDER_SYNC_DOCUMENTATION.md)** - Folder structure preservation
-- **[OAuth Setup](OAUTH_REDIRECT_FIX.md)** - Dynamic OAuth configuration
-- **[Binary Files](PDF_UPLOAD_FIX.md)** - PDF and image upload support
+- **[Conflict Resolution](docs/CONFLICTS.md)** - Handling sync conflicts
+- **[Tombstone Management](docs/TOMBSTONES.md)** - Deletion tracking
 
 ### Reference
-- **[Environment Variables](ENVIRONMENT_VARIABLES.md)** - All configuration options
-- **[Server API](packages/server/README.md)** - Server documentation
+- **[Plugin API](packages/plugin/README.md)** - Plugin documentation
 - **[Changelog](CHANGELOG.md)** - Version history
-- **[Summary](SUMMARY.md)** - Project overview
+- **[Architecture](docs/ARCHITECTURE.md)** - Technical overview
 
 ## 🏗️ Architecture
 
+Vync is a **local-first** plugin that runs entirely within Obsidian:
+
 ```
-vync/
-├── packages/
-│   ├── server/          # Backend sync server
-│   │   ├── src/
-│   │   │   ├── routes/  # API endpoints
-│   │   │   └── services/# Drive services
-│   │   └── .env         # Configuration
-│   │
-│   └── plugin/          # Obsidian plugin
-│       ├── src/
-│       │   ├── services/# Sync services
-│       │   └── main.ts  # Plugin entry
-│       └── manifest.json
-│
-└── docs/               # Documentation
+vync/packages/plugin/
+├── src/
+│   ├── main.ts                  # Plugin entry point
+│   ├── services/
+│   │   ├── googleDriveAuth.ts   # OAuth authentication
+│   │   ├── googleDriveService.ts# Google Drive API client
+│   │   ├── syncService.ts       # Sync orchestration
+│   │   ├── syncState.ts         # State management
+│   │   ├── tombstoneManager.ts  # Deletion tracking
+│   │   ├── vaultWatcher.ts      # File change detection
+│   │   └── conflictUI.ts        # Conflict resolution UI
+│   └── types.ts                 # TypeScript definitions
+├── tests/                       # Unit tests
+└── manifest.json                # Plugin manifest
 ```
+
+### How It Works
+
+1. **Direct Integration** - Plugin communicates directly with Google Drive API
+2. **Local State** - Sync state stored in `.obsidian/plugins/vync/`
+3. **OAuth Tokens** - Encrypted and stored locally
+4. **No Server** - Zero external dependencies, completely private
 
 ## 🔧 Configuration
 
-### Server (.env)
-```bash
-# Storage backend
-DRIVE_TYPE=google  # 'local' or 'google'
+### Google Drive API Setup
 
-# Google OAuth (if using Google Drive)
-GOOGLE_CLIENT_ID=xxx.apps.googleusercontent.com
-GOOGLE_CLIENT_SECRET=xxx
+1. **Create Google Cloud Project**
+   - Go to [Google Cloud Console](https://console.cloud.google.com/)
+   - Create a new project
+   - Enable Google Drive API
 
-# Optional - auto-detected if not set
-GOOGLE_REDIRECT_URI=https://your-domain.com/auth/google/callback
-```
+2. **Configure OAuth Credentials**
+   - Create OAuth 2.0 Client ID (Desktop app type)
+   - Download credentials JSON
+   - Add to plugin settings
 
-### Obsidian Plugin
+### Plugin Settings (in Obsidian)
+
 ```
 Settings → Vync:
-- Server URL: http://localhost:3000
-- Vault ID: my-vault
-- Auto Sync: ON
+├── Google OAuth
+│   ├── Client ID: [from Google Cloud]
+│   ├── Client Secret: [from Google Cloud]
+│   └── Status: ✓ Connected
+├── Sync Settings
+│   ├── Auto Sync: ON
+│   ├── Sync Interval: 5 minutes
+│   └── Conflict Resolution: Prompt
+└── Advanced
+    ├── Tombstone Grace Period: 30 days
+    └── Debug Logging: OFF
 ```
 
-## 🌐 Deployment
+## 📦 Distribution
 
-### Supported Platforms
-- ✅ Vercel (Serverless)
-- ✅ Railway (Container)
-- ✅ Render (Web Service)
-- ✅ Docker (Container)
-- ✅ VPS (PM2)
+### Publishing to Community Plugins
 
-### Quick Deploy
-```bash
-# Vercel
-vercel deploy
+When ready to publish:
 
-# Railway
-railway up
+1. **Create Release Branch**
+   ```bash
+   git checkout -b release/v1.0.0
+   git push origin release/v1.0.0
+   ```
 
-# Docker
-docker build -t vync .
-docker run -p 3000:3000 vync
-```
+2. **Automatic Release** - GitHub Actions will:
+   - Run tests
+   - Build plugin
+   - Create version tag
+   - Create GitHub release
+   - Attach `main.js`, `manifest.json`, `styles.css`
 
-**📖 Full guide:** [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md)
+3. **Submit to Obsidian**
+   - Fork [obsidian-releases](https://github.com/obsidianmd/obsidian-releases)
+   - Add your plugin to `community-plugins.json`
+   - Submit PR
 
 ## 📊 How It Works
 
 ### Sync Flow
-1. **File Created** in Obsidian
-2. **Plugin Detects** change via VaultWatcher
-3. **Immediate Upload** to server
-4. **Server Uploads** to Google Drive
-5. **Index Updated** with file metadata
-6. **Folder Structure** created automatically
+1. **File Changed** in Obsidian
+2. **VaultWatcher Detects** change event
+3. **SyncService** determines action (upload/download/conflict)
+4. **Direct Upload/Download** to/from Google Drive
+5. **State Updated** locally with revision IDs
+6. **Folder Structure** mirrored automatically
 
-### Index Reconciliation
-- Runs every 5 minutes automatically
-- Detects files created outside Obsidian
-- Ensures vault and index parity
-- Manual trigger via command palette
+### Smart Sync Features
 
-### Conflict Resolution
-- Automatic detection of conflicts
-- User-prompted resolution
-- Preserves both versions
-- Tracks conflict history
+**Three-Way Comparison**
+- Compares: Local file ↔ Last sync state ↔ Remote file
+- Uses revision IDs (not timestamps) for accuracy
+- Detects: unchanged, local-only, remote-only, conflicts
 
-## 🔐 Security
+**Tombstone Management**
+- Tracks deletions with grace periods (default 30 days)
+- Syncs deletions across devices
+- Prevents accidental data loss
 
-### Best Practices
-- ✅ HTTPS in production
-- ✅ Environment-specific credentials
-- ✅ Restricted CORS origins
-- ✅ Sensitive files in .gitignore
-- ✅ OAuth token encryption
+**Conflict Resolution**
+- Detects simultaneous changes on multiple devices
+- Presents user with resolution options
+- Preserves both versions if requested
 
-### Protected Files
+## 🔐 Security & Privacy
+
+### Local-First Design
+- ✅ **No External Server** - Direct vault-to-Google Drive sync
+- ✅ **Local OAuth Tokens** - Encrypted and stored in your vault
+- ✅ **No Data Collection** - Zero telemetry or analytics
+- ✅ **Open Source** - Fully auditable code
+- ✅ **Standard APIs** - Uses official Google Drive API only
+
+### Data Storage
 ```
-.env
-.env.production
-oauth-tokens.json
-credentials.json
+.obsidian/plugins/vync/
+├── data.json           # Plugin settings (no secrets)
+├── sync-state.json     # Sync index (file hashes, IDs)
+├── tombstones.json     # Deletion tracking
+└── .oauth-tokens.json  # Encrypted OAuth tokens (local only)
 ```
+
+**Note:** OAuth tokens never leave your device and are encrypted at rest.
 
 ## 🧪 Testing
 
-### Manual Tests
+### Development
 ```bash
-# Test file sync
-1. Create file in Obsidian
-2. Check console for upload
-3. Verify in Google Drive
+cd packages/plugin
 
-# Test folder sync
-1. Create nested folders
-2. Add files to folders
-3. Check Drive structure
+# Run unit tests
+bun test
 
-# Test OAuth
-1. Visit /auth/google
-2. Complete flow
-3. Check /auth/status
+# Run linter
+bun run lint
+
+# Build plugin
+bun run build
+
+# Watch mode
+bun run dev
 ```
 
-### Commands
-```bash
-# Server health
-curl http://localhost:3000/health
-
-# Auth status
-curl http://localhost:3000/auth/status
-
-# Plugin commands (in Obsidian)
-- "Sync Vault"
-- "Reconcile Sync Index"
-- "Test Connection"
+### Plugin Commands (in Obsidian)
 ```
+Cmd/Ctrl + P → Search for:
+├── "Vync: Full Sync" - Sync entire vault
+├── "Vync: Sync Status" - View sync state
+├── "Vync: Resolve Conflicts" - Handle conflicts
+└── "Vync: Clear Cache" - Reset sync state
+```
+
+### Manual Testing
+1. **File Sync** - Create/edit files, verify in Drive
+2. **Folder Sync** - Create nested folders, check structure
+3. **Renames** - Rename files/folders, verify tracking
+4. **Deletions** - Delete files, check tombstones
+5. **Conflicts** - Edit same file on two devices simultaneously
 
 ## 🐛 Troubleshooting
 
 ### Common Issues
 
-**Server won't start**
-```bash
-# Check port availability
-lsof -i :3000
-# Use different port
-PORT=8080 bun run dev
-```
+**OAuth Authentication Failed**
+- Verify Client ID and Secret are correct
+- Check OAuth consent screen is configured
+- Ensure "Desktop app" type is selected
+- Try removing and re-adding credentials
 
-**OAuth errors**
-```bash
-# Add redirect URI to Google Console
-http://localhost:3000/auth/google/callback
-```
+**Files Not Syncing**
+- Check sync status in plugin settings
+- Verify Google Drive has sufficient space
+- Look for conflicts in conflict resolution UI
+- Check Obsidian Developer Console (Cmd/Ctrl + Shift + I) for errors
 
-**Files not syncing**
-```bash
-# Run index reconciliation
-Cmd/Ctrl + P → "Reconcile Sync Index"
-```
+**Sync Conflicts**
+- Use "Vync: Resolve Conflicts" command
+- Choose which version to keep
+- Or keep both versions with different names
 
-**📖 More solutions:** See documentation links above
+**Plugin Not Loading**
+- Check `.obsidian/plugins/vync/` exists
+- Verify `manifest.json`, `main.js`, `styles.css` are present
+- Enable plugin in Settings → Community Plugins
+- Check Obsidian console for error messages
+
+**📖 More help:** [Open an issue](https://github.com/your-repo/issues)
 
 ## 📈 Roadmap
 
-### v1.1 (Short Term)
-- [ ] File deletion from Google Drive
-- [ ] Chunked large file uploads
-- [ ] Selective sync patterns
+### v1.1 (Next Release)
+- [ ] Delta sync for large files
+- [ ] Selective sync (exclude patterns)
+- [ ] Bandwidth optimization
+- [ ] Sync statistics dashboard
 
-### v1.2 (Medium Term)
-- [ ] Real-time collaboration
-- [ ] Mobile app support
-- [ ] Alternative storage backends
+### v1.2 (Future)
+- [ ] Mobile app support (iOS/Android)
+- [ ] Alternative backends (Dropbox, OneDrive)
+- [ ] End-to-end encryption option
+- [ ] Shared vault collaboration
 
 ### v2.0 (Long Term)
-- [ ] End-to-end encryption
-- [ ] Multi-user support
-- [ ] Advanced conflict resolution
+- [ ] Multi-device conflict resolution UI
+- [ ] Advanced sync rules engine
+- [ ] Plugin marketplace integration
+- [ ] Automated backups and versioning
 
 ## 🤝 Contributing
 
@@ -266,9 +307,10 @@ Built with:
 
 ## 💬 Support
 
-- **Documentation**: See links above
-- **Issues**: GitHub Issues
-- **Discussions**: GitHub Discussions
+- **Documentation**: See [Documentation](#-documentation) section
+- **Bug Reports**: [GitHub Issues](https://github.com/your-repo/issues)
+- **Feature Requests**: [GitHub Discussions](https://github.com/your-repo/discussions)
+- **Questions**: [GitHub Discussions Q&A](https://github.com/your-repo/discussions/categories/q-a)
 
 ## ⭐ Star History
 
@@ -276,8 +318,6 @@ If this project helps you, consider giving it a star!
 
 ---
 
-**Status**: Production Ready ✅
-**Version**: 1.0.0
-**Last Updated**: 2024
+**Status**: Beta Testing 🚧
 
-[Quick Start](QUICK_START.md) | [Documentation](SUMMARY.md) | [Deployment](DEPLOYMENT_GUIDE.md) | [Contributing](#contributing)
+[Quick Start](QUICK_START.md) | [Documentation](#-documentation) | [Architecture](#-architecture) | [Contributing](#-contributing)
