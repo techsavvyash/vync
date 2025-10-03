@@ -32,7 +32,7 @@ __export(exports_main, {
   default: () => ObsidianSyncPlugin
 });
 module.exports = __toCommonJS(exports_main);
-var import_obsidian4 = require("obsidian");
+var import_obsidian5 = require("obsidian");
 
 // src/services/vaultWatcher.ts
 var import_obsidian = require("obsidian");
@@ -297,12 +297,28 @@ class SyncService {
   vault;
   syncStateManager;
   vaultScanner;
-  constructor(serverUrl, vaultId, vault, syncStateManager) {
+  authService;
+  constructor(serverUrl, vaultId, vault, syncStateManager, authService) {
     this.serverUrl = serverUrl;
     this.vaultId = vaultId;
     this.vault = vault;
     this.syncStateManager = syncStateManager;
     this.vaultScanner = new VaultScanner(vault);
+    this.authService = authService;
+  }
+  async getAuthHeaders() {
+    const headers = {
+      "Content-Type": "application/json"
+    };
+    if (this.authService?.isAuthenticated()) {
+      try {
+        const token = await this.authService.getValidAccessToken();
+        headers["Authorization"] = `Bearer ${token}`;
+      } catch (error) {
+        console.error("Failed to get access token:", error);
+      }
+    }
+    return headers;
   }
   async syncVault() {
     try {
@@ -349,11 +365,10 @@ class SyncService {
         console.log(`✅ Added ${newFilesFound} new file(s) to sync index`);
       }
       console.log("\uD83D\uDCE1 Requesting delta from server...");
+      const authHeaders = await this.getAuthHeaders();
       const deltaResponse = await fetch(`${this.serverUrl}/sync/delta`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
+        headers: authHeaders,
         body: JSON.stringify({
           vaultId: this.vaultId,
           localIndex: {
@@ -611,7 +626,10 @@ class SyncService {
   }
   async checkRemoteChanges() {
     try {
-      const response = await fetch(`${this.serverUrl}/sync/metadata/${this.vaultId}`);
+      const authHeaders = await this.getAuthHeaders();
+      const response = await fetch(`${this.serverUrl}/sync/metadata/${this.vaultId}`, {
+        headers: authHeaders
+      });
       if (response.ok) {
         const metadata = await response.json();
         return metadata.files || [];
@@ -680,7 +698,10 @@ class SyncService {
         if (shouldDownload) {
           console.log(`⬇️  Starting download: ${normalizedPath}`);
           console.log(`  From remote ID: ${remoteFile.id}`);
-          const response = await fetch(`${this.serverUrl}/sync/download/${remoteFile.id}`);
+          const authHeaders = await this.getAuthHeaders();
+          const response = await fetch(`${this.serverUrl}/sync/download/${remoteFile.id}`, {
+            headers: authHeaders
+          });
           if (response.status === 401) {
             throw new Error("Authentication required. Please authenticate with Google Drive in plugin settings.");
           }
@@ -747,7 +768,10 @@ class SyncService {
   }
   async getConflicts() {
     try {
-      const response = await fetch(`${this.serverUrl}/sync/conflicts`);
+      const authHeaders = await this.getAuthHeaders();
+      const response = await fetch(`${this.serverUrl}/sync/conflicts`, {
+        headers: authHeaders
+      });
       if (response.ok) {
         const result = await response.json();
         return result.data?.conflicts || [];
@@ -764,9 +788,7 @@ class SyncService {
     try {
       const response = await fetch(`${this.serverUrl}/sync/resolve-conflict`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
+        headers: await this.getAuthHeaders(),
         body: JSON.stringify({
           conflictId,
           strategy,
@@ -789,9 +811,7 @@ class SyncService {
     try {
       const response = await fetch(`${this.serverUrl}/sync/auto-resolve`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
+        headers: await this.getAuthHeaders(),
         body: JSON.stringify({
           conflictId
         })
@@ -831,7 +851,10 @@ class SyncService {
   }
   async getFileChanges() {
     try {
-      const response = await fetch(`${this.serverUrl}/sync/changes`);
+      const authHeaders = await this.getAuthHeaders();
+      const response = await fetch(`${this.serverUrl}/sync/changes`, {
+        headers: authHeaders
+      });
       if (response.ok) {
         return await response.json();
       } else {
@@ -845,7 +868,10 @@ class SyncService {
   }
   async testConnection() {
     try {
-      const response = await fetch(`${this.serverUrl}/health`);
+      const authHeaders = await this.getAuthHeaders();
+      const response = await fetch(`${this.serverUrl}/health`, {
+        headers: authHeaders
+      });
       if (response.ok) {
         const health = await response.json();
         return {
@@ -1102,7 +1128,10 @@ class SyncService {
     }
   }
   async downloadSingleFile(fileInfo) {
-    const response = await fetch(`${this.serverUrl}/sync/download/${fileInfo.id}`);
+    const authHeaders = await this.getAuthHeaders();
+    const response = await fetch(`${this.serverUrl}/sync/download/${fileInfo.id}`, {
+      headers: authHeaders
+    });
     if (response.status === 401) {
       throw new Error("Authentication required");
     }
@@ -1856,8 +1885,141 @@ class SyncIndexFile {
   }
 }
 
+// src/services/googleDriveAuth.ts
+var import_obsidian4 = require("obsidian");
+
+class GoogleDriveAuthService {
+  clientId;
+  clientSecret;
+  redirectUri;
+  tokens = null;
+  constructor(clientId, clientSecret, redirectUri = "urn:ietf:wg:oauth:2.0:oob") {
+    this.clientId = clientId;
+    this.clientSecret = clientSecret;
+    this.redirectUri = redirectUri;
+  }
+  getAuthUrl() {
+    const scopes = [
+      "https://www.googleapis.com/auth/drive.file"
+    ];
+    const params = new URLSearchParams({
+      client_id: this.clientId,
+      redirect_uri: this.redirectUri,
+      response_type: "code",
+      scope: scopes.join(" "),
+      access_type: "offline",
+      prompt: "consent"
+    });
+    return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
+  }
+  async exchangeCodeForTokens(code) {
+    try {
+      const response = await import_obsidian4.requestUrl({
+        url: "https://oauth2.googleapis.com/token",
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
+        body: new URLSearchParams({
+          code,
+          client_id: this.clientId,
+          client_secret: this.clientSecret,
+          redirect_uri: this.redirectUri,
+          grant_type: "authorization_code"
+        }).toString()
+      });
+      const data = response.json;
+      if (!data.access_token) {
+        throw new Error("No access token received");
+      }
+      this.tokens = {
+        access_token: data.access_token,
+        refresh_token: data.refresh_token,
+        scope: data.scope || "",
+        token_type: data.token_type || "Bearer",
+        expiry_date: Date.now() + data.expires_in * 1000
+      };
+      return this.tokens;
+    } catch (error) {
+      console.error("Error exchanging code for tokens:", error);
+      throw new Error(`Failed to exchange authorization code: ${error}`);
+    }
+  }
+  setTokens(tokens) {
+    this.tokens = tokens;
+  }
+  getTokens() {
+    return this.tokens;
+  }
+  isAuthenticated() {
+    return this.tokens !== null && this.tokens.access_token !== undefined;
+  }
+  isTokenExpired() {
+    if (!this.tokens || !this.tokens.expiry_date) {
+      return true;
+    }
+    return Date.now() >= this.tokens.expiry_date - 60000;
+  }
+  async refreshAccessToken() {
+    if (!this.tokens?.refresh_token) {
+      throw new Error("No refresh token available");
+    }
+    try {
+      const response = await import_obsidian4.requestUrl({
+        url: "https://oauth2.googleapis.com/token",
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
+        body: new URLSearchParams({
+          refresh_token: this.tokens.refresh_token,
+          client_id: this.clientId,
+          client_secret: this.clientSecret,
+          grant_type: "refresh_token"
+        }).toString()
+      });
+      const data = response.json;
+      this.tokens = {
+        ...this.tokens,
+        access_token: data.access_token,
+        expiry_date: Date.now() + data.expires_in * 1000
+      };
+    } catch (error) {
+      console.error("Error refreshing access token:", error);
+      throw new Error(`Failed to refresh access token: ${error}`);
+    }
+  }
+  async getValidAccessToken() {
+    if (!this.tokens) {
+      throw new Error("Not authenticated");
+    }
+    if (this.isTokenExpired() && this.tokens.refresh_token) {
+      await this.refreshAccessToken();
+    }
+    return this.tokens.access_token;
+  }
+  async revokeTokens() {
+    if (!this.tokens) {
+      return;
+    }
+    try {
+      await import_obsidian4.requestUrl({
+        url: `https://oauth2.googleapis.com/revoke?token=${this.tokens.access_token}`,
+        method: "POST"
+      });
+      this.tokens = null;
+    } catch (error) {
+      console.error("Error revoking tokens:", error);
+      this.tokens = null;
+    }
+  }
+}
+
 // src/main.ts
 var DEFAULT_SETTINGS = {
+  googleClientId: "",
+  googleClientSecret: "",
+  googleTokens: null,
   serverUrl: "http://localhost:3000",
   vaultId: "",
   syncInterval: 30,
@@ -1866,8 +2028,9 @@ var DEFAULT_SETTINGS = {
   syncState: null
 };
 
-class ObsidianSyncPlugin extends import_obsidian4.Plugin {
+class ObsidianSyncPlugin extends import_obsidian5.Plugin {
   settings = DEFAULT_SETTINGS;
+  googleAuthService = null;
   syncTimer = null;
   remoteCheckTimer = null;
   indexReconcileTimer = null;
@@ -1878,9 +2041,10 @@ class ObsidianSyncPlugin extends import_obsidian4.Plugin {
   syncIndexFile = null;
   pendingChanges = new Set;
   syncDebounceTimer = null;
+  callbackServer = null;
   async onload() {
     await this.loadSettings();
-    this.checkServerAndNotify();
+    await this.initializeGoogleDrive();
     this.addRibbonIcon("sync", "Obsidian Sync", () => {
       this.syncVault();
     });
@@ -1905,20 +2069,20 @@ class ObsidianSyncPlugin extends import_obsidian4.Plugin {
       name: "Reconcile Sync Index",
       callback: async () => {
         if (this.syncService) {
-          new import_obsidian4.Notice("Reconciling sync index...");
+          new import_obsidian5.Notice("Reconciling sync index...");
           try {
             const newFiles = await this.syncService.reconcileIndex();
             if (newFiles > 0) {
-              new import_obsidian4.Notice(`Found and uploaded ${newFiles} untracked file(s)`);
+              new import_obsidian5.Notice(`Found and uploaded ${newFiles} untracked file(s)`);
               await this.saveSyncState();
             } else {
-              new import_obsidian4.Notice("Index is already in sync");
+              new import_obsidian5.Notice("Index is already in sync");
             }
           } catch (error) {
-            new import_obsidian4.Notice("Failed to reconcile index: " + error.message);
+            new import_obsidian5.Notice("Failed to reconcile index: " + error.message);
           }
         } else {
-          new import_obsidian4.Notice("Sync service not initialized");
+          new import_obsidian5.Notice("Sync service not initialized");
         }
       }
     });
@@ -1940,11 +2104,11 @@ class ObsidianSyncPlugin extends import_obsidian4.Plugin {
       console.log("  Vault ID:", this.settings.vaultId || "(not set)");
       this.syncIndexFile = new SyncIndexFile(this.app.vault);
       await this.loadSyncState();
-      this.syncService = new SyncService(this.settings.serverUrl, this.settings.vaultId, this.app.vault, this.syncStateManager);
+      this.syncService = new SyncService(this.settings.serverUrl, this.settings.vaultId, this.app.vault, this.syncStateManager, this.googleAuthService);
       this.conflictUI = new ConflictUIService(this.app, this.syncService);
       this.conflictUI.onResolution((result) => {
         console.log(`Conflict resolved: ${result.conflictId} -> ${result.resolution}`);
-        new import_obsidian4.Notice(`Conflict resolved: ${result.resolution}`);
+        new import_obsidian5.Notice(`Conflict resolved: ${result.resolution}`);
       });
       this.vaultWatcher = new VaultWatcherService(this.app.vault);
       this.vaultWatcher.onChange(async (change) => {
@@ -2007,10 +2171,10 @@ class ObsidianSyncPlugin extends import_obsidian4.Plugin {
       this.startRemoteCheck();
       this.startIndexReconciliation();
       this.performInitialSync();
-      new import_obsidian4.Notice("Obsidian Sync initialized successfully");
+      new import_obsidian5.Notice("Obsidian Sync initialized successfully");
     } catch (error) {
       console.error("Failed to initialize Obsidian Sync:", error);
-      new import_obsidian4.Notice("Failed to initialize Obsidian Sync: " + error.message);
+      new import_obsidian5.Notice("Failed to initialize Obsidian Sync: " + error.message);
     }
   }
   async loadSettings() {
@@ -2041,12 +2205,79 @@ class ObsidianSyncPlugin extends import_obsidian4.Plugin {
   }
   async saveSettings() {
     await this.saveData(this.settings);
+    await this.initializeGoogleDrive();
     await this.initializeServices();
   }
   async saveSyncState() {
     if (this.syncStateManager && this.syncIndexFile) {
       const state = this.syncStateManager.getState();
       await this.syncIndexFile.save(state);
+    }
+  }
+  async initializeGoogleDrive() {
+    if (!this.settings.googleClientId || !this.settings.googleClientSecret) {
+      console.log("Google Drive credentials not configured");
+      return;
+    }
+    try {
+      this.googleAuthService = new GoogleDriveAuthService(this.settings.googleClientId, this.settings.googleClientSecret);
+      if (this.settings.googleTokens) {
+        this.googleAuthService.setTokens(this.settings.googleTokens);
+        console.log("✅ Google Drive authentication restored from saved tokens");
+      }
+    } catch (error) {
+      console.error("Failed to initialize Google Drive:", error);
+      new import_obsidian5.Notice("Failed to initialize Google Drive: " + error.message);
+    }
+  }
+  async startGoogleDriveOAuth() {
+    if (!this.googleAuthService) {
+      new import_obsidian5.Notice("Please configure Google OAuth credentials first");
+      return;
+    }
+    try {
+      const authUrl = this.googleAuthService.getAuthUrl();
+      window.open(authUrl, "_blank");
+      new import_obsidian5.Notice("Opening Google authentication in browser...");
+      await this.startOAuthCallbackServer();
+    } catch (error) {
+      console.error("OAuth error:", error);
+      new import_obsidian5.Notice("Failed to start OAuth: " + error.message);
+    }
+  }
+  async startOAuthCallbackServer() {
+    const modal = new OAuthCallbackModal(this.app, async (code) => {
+      try {
+        if (!this.googleAuthService) {
+          throw new Error("Google Auth service not initialized");
+        }
+        new import_obsidian5.Notice("Exchanging authorization code...");
+        const tokens = await this.googleAuthService.exchangeCodeForTokens(code);
+        this.settings.googleTokens = tokens;
+        await this.saveData(this.settings);
+        new import_obsidian5.Notice("✅ Successfully authenticated with Google Drive!");
+        console.log("Google Drive authentication successful");
+      } catch (error) {
+        console.error("Failed to exchange auth code:", error);
+        new import_obsidian5.Notice("Authentication failed: " + error.message);
+      }
+    });
+    modal.open();
+  }
+  isGoogleDriveAuthenticated() {
+    return this.googleAuthService?.isAuthenticated() || false;
+  }
+  async signOutGoogleDrive() {
+    if (this.googleAuthService) {
+      try {
+        await this.googleAuthService.revokeTokens();
+        this.settings.googleTokens = null;
+        await this.saveData(this.settings);
+        new import_obsidian5.Notice("Signed out from Google Drive");
+      } catch (error) {
+        console.error("Failed to sign out:", error);
+        new import_obsidian5.Notice("Failed to sign out: " + error.message);
+      }
     }
   }
   debouncedSync() {
@@ -2098,7 +2329,7 @@ class ObsidianSyncPlugin extends import_obsidian4.Plugin {
         try {
           const result = await this.syncService.syncVault();
           if (result.downloadedFiles && result.downloadedFiles > 0) {
-            new import_obsidian4.Notice(`Downloaded ${result.downloadedFiles} file(s) from remote`);
+            new import_obsidian5.Notice(`Downloaded ${result.downloadedFiles} file(s) from remote`);
           }
         } catch (error) {
           console.error("  ❌ Remote check failed:", error);
@@ -2130,7 +2361,7 @@ class ObsidianSyncPlugin extends import_obsidian4.Plugin {
         const newFilesFound = await this.syncService.reconcileIndex();
         if (newFilesFound > 0) {
           console.log(`  ✅ Found and uploaded ${newFilesFound} untracked file(s)`);
-          new import_obsidian4.Notice(`Found and uploaded ${newFilesFound} untracked file(s)`);
+          new import_obsidian5.Notice(`Found and uploaded ${newFilesFound} untracked file(s)`);
           await this.saveSyncState();
         }
       } catch (error) {
@@ -2176,10 +2407,10 @@ class ObsidianSyncPlugin extends import_obsidian4.Plugin {
       if (result.success) {
         if (result.downloadedFiles && result.downloadedFiles > 0) {
           console.log(`  ✅ Initial sync: Downloaded ${result.downloadedFiles} file(s) from remote`);
-          new import_obsidian4.Notice(`Initial sync: Downloaded ${result.downloadedFiles} file(s) from remote`);
+          new import_obsidian5.Notice(`Initial sync: Downloaded ${result.downloadedFiles} file(s) from remote`);
         } else if (result.uploadedFiles && result.uploadedFiles > 0) {
           console.log(`  ✅ Initial sync: Uploaded ${result.uploadedFiles} file(s) to remote`);
-          new import_obsidian4.Notice(`Initial sync: Uploaded ${result.uploadedFiles} file(s) to remote`);
+          new import_obsidian5.Notice(`Initial sync: Uploaded ${result.uploadedFiles} file(s) to remote`);
         } else {
           console.log("  ✅ Initial sync: Vault is up to date");
         }
@@ -2192,15 +2423,15 @@ class ObsidianSyncPlugin extends import_obsidian4.Plugin {
   }
   async syncVault() {
     if (!this.settings.vaultId) {
-      new import_obsidian4.Notice("Please set a vault ID in the plugin settings");
+      new import_obsidian5.Notice("Please set a vault ID in the plugin settings");
       return;
     }
     if (!this.syncService) {
-      new import_obsidian4.Notice("Sync service not initialized");
+      new import_obsidian5.Notice("Sync service not initialized");
       return;
     }
     try {
-      new import_obsidian4.Notice("Starting vault sync...");
+      new import_obsidian5.Notice("Starting vault sync...");
       const result = await this.syncService.syncVault();
       if (result.success) {
         let message = `Sync completed`;
@@ -2216,56 +2447,32 @@ class ObsidianSyncPlugin extends import_obsidian4.Plugin {
         if (result.conflicts && result.conflicts > 0) {
           message += ` ⚠${result.conflicts}`;
         }
-        new import_obsidian4.Notice(message);
+        new import_obsidian5.Notice(message);
         this.pendingChanges.clear();
         console.log("Pending changes cleared");
         await this.saveSyncState();
       } else {
-        new import_obsidian4.Notice(`Sync failed: ${result.message}`);
+        new import_obsidian5.Notice(`Sync failed: ${result.message}`);
       }
     } catch (error) {
       console.error("Sync error:", error);
-      new import_obsidian4.Notice("Sync failed: " + error.message);
+      new import_obsidian5.Notice("Sync failed: " + error.message);
     }
   }
   async testConnection() {
     if (!this.syncService) {
-      new import_obsidian4.Notice("Sync service not initialized");
+      new import_obsidian5.Notice("Sync service not initialized");
       return;
     }
     try {
       const connection = await this.syncService.testConnection();
       if (connection.connected) {
-        new import_obsidian4.Notice(`Server connection successful: ${connection.message}`);
+        new import_obsidian5.Notice(`Server connection successful: ${connection.message}`);
       } else {
-        new import_obsidian4.Notice(`Server connection failed: ${connection.message}`);
+        new import_obsidian5.Notice(`Server connection failed: ${connection.message}`);
       }
     } catch (error) {
-      new import_obsidian4.Notice("Connection test failed: " + error.message);
-    }
-  }
-  async checkAuthStatus() {
-    try {
-      const response = await fetch(`${this.settings.serverUrl}/auth/status`);
-      if (response.ok) {
-        return await response.json();
-      } else {
-        return { authenticated: false, message: "Failed to check auth status" };
-      }
-    } catch (error) {
-      return { authenticated: false, message: `Auth check failed: ${error}` };
-    }
-  }
-  openAuthPage() {
-    window.open(`${this.settings.serverUrl}/auth/google`, "_blank");
-    new import_obsidian4.Notice("Opening authentication page in browser...");
-  }
-  async checkServerAndNotify() {
-    const authStatus = await this.checkAuthStatus();
-    if (!authStatus.authenticated) {
-      setTimeout(() => {
-        new import_obsidian4.Notice("Obsidian Sync: Server not connected. Please start the server and authenticate with Google Drive.", 1e4);
-      }, 2000);
+      new import_obsidian5.Notice("Connection test failed: " + error.message);
     }
   }
   onSettingsChange() {
@@ -2277,9 +2484,8 @@ class ObsidianSyncPlugin extends import_obsidian4.Plugin {
   }
 }
 
-class ObsidianSyncSettingTab extends import_obsidian4.PluginSettingTab {
+class ObsidianSyncSettingTab extends import_obsidian5.PluginSettingTab {
   plugin;
-  authStatusEl = null;
   constructor(app, plugin) {
     super(app, plugin);
     this.plugin = plugin;
@@ -2289,58 +2495,113 @@ class ObsidianSyncSettingTab extends import_obsidian4.PluginSettingTab {
     containerEl.empty();
     containerEl.createEl("h2", { text: "Obsidian Sync Settings" });
     containerEl.createEl("h3", { text: "Server Configuration" });
-    new import_obsidian4.Setting(containerEl).setName("Server URL").setDesc("URL of the sync server").addText((text) => text.setPlaceholder("http://localhost:3000").setValue(this.plugin.settings.serverUrl).onChange(async (value) => {
+    new import_obsidian5.Setting(containerEl).setName("Server URL").setDesc("URL of the sync server").addText((text) => text.setPlaceholder("http://localhost:3000").setValue(this.plugin.settings.serverUrl).onChange(async (value) => {
       this.plugin.settings.serverUrl = value;
       await this.plugin.saveSettings();
-      this.updateAuthStatus();
     }));
-    containerEl.createEl("h3", { text: "Authentication" });
-    const authStatusSetting = new import_obsidian4.Setting(containerEl).setName("Google Drive Authentication").setDesc("Current authentication status");
-    this.authStatusEl = authStatusSetting.descEl.createDiv();
-    this.authStatusEl.setText("Checking authentication status...");
-    authStatusSetting.addButton((button) => button.setButtonText("Check Status").onClick(async () => {
-      await this.updateAuthStatus();
+    containerEl.createEl("h3", { text: "Google Drive Configuration" });
+    new import_obsidian5.Setting(containerEl).setName("Google Client ID").setDesc("OAuth 2.0 Client ID from Google Cloud Console").addText((text) => text.setPlaceholder("Enter your Google Client ID").setValue(this.plugin.settings.googleClientId).onChange(async (value) => {
+      this.plugin.settings.googleClientId = value;
+      await this.plugin.saveSettings();
     }));
-    authStatusSetting.addButton((button) => button.setButtonText("Authenticate").setCta().onClick(() => {
-      this.plugin.openAuthPage();
-    }));
-    this.updateAuthStatus();
+    new import_obsidian5.Setting(containerEl).setName("Google Client Secret").setDesc("OAuth 2.0 Client Secret from Google Cloud Console").addText((text) => {
+      text.setPlaceholder("Enter your Google Client Secret").setValue(this.plugin.settings.googleClientSecret).onChange(async (value) => {
+        this.plugin.settings.googleClientSecret = value;
+        await this.plugin.saveSettings();
+      });
+      text.inputEl.type = "password";
+      return text;
+    });
+    containerEl.createEl("h3", { text: "Google Drive Authentication" });
+    const authStatusSetting = new import_obsidian5.Setting(containerEl).setName("Authentication Status").setDesc(this.plugin.isGoogleDriveAuthenticated() ? "✓ Authenticated with Google Drive" : "✗ Not authenticated");
+    if (!this.plugin.isGoogleDriveAuthenticated()) {
+      authStatusSetting.addButton((button) => button.setButtonText("Authenticate with Google Drive").setCta().onClick(async () => {
+        await this.plugin.startGoogleDriveOAuth();
+      }));
+    } else {
+      authStatusSetting.addButton((button) => button.setButtonText("Sign Out").setWarning().onClick(async () => {
+        await this.plugin.signOutGoogleDrive();
+        this.display();
+      }));
+    }
     containerEl.createEl("h3", { text: "Vault Configuration" });
-    new import_obsidian4.Setting(containerEl).setName("Vault ID").setDesc("Unique identifier for this vault").addText((text) => text.setPlaceholder("my-vault").setValue(this.plugin.settings.vaultId).onChange(async (value) => {
+    new import_obsidian5.Setting(containerEl).setName("Vault ID").setDesc("Unique identifier for this vault").addText((text) => text.setPlaceholder("my-vault").setValue(this.plugin.settings.vaultId).onChange(async (value) => {
       this.plugin.settings.vaultId = value;
       await this.plugin.saveSettings();
     }));
     containerEl.createEl("h3", { text: "Sync Settings" });
-    new import_obsidian4.Setting(containerEl).setName("Sync Interval").setDesc("Auto-sync interval in seconds").addSlider((slider) => slider.setLimits(10, 300, 10).setValue(this.plugin.settings.syncInterval).setDynamicTooltip().onChange(async (value) => {
+    new import_obsidian5.Setting(containerEl).setName("Sync Interval").setDesc("Auto-sync interval in seconds").addSlider((slider) => slider.setLimits(10, 300, 10).setValue(this.plugin.settings.syncInterval).setDynamicTooltip().onChange(async (value) => {
       this.plugin.settings.syncInterval = value;
       await this.plugin.saveSettings();
       this.plugin.onSettingsChange();
     }));
-    new import_obsidian4.Setting(containerEl).setName("Auto Sync").setDesc("Automatically sync on file changes").addToggle((toggle) => toggle.setValue(this.plugin.settings.autoSync).onChange(async (value) => {
+    new import_obsidian5.Setting(containerEl).setName("Auto Sync").setDesc("Automatically sync on file changes").addToggle((toggle) => toggle.setValue(this.plugin.settings.autoSync).onChange(async (value) => {
       this.plugin.settings.autoSync = value;
       await this.plugin.saveSettings();
       this.plugin.onSettingsChange();
     }));
-    new import_obsidian4.Setting(containerEl).setName("Conflict Resolution").setDesc("How to handle sync conflicts").addDropdown((dropdown) => dropdown.addOption("local", "Keep local version").addOption("remote", "Keep remote version").addOption("manual", "Ask me each time").setValue(this.plugin.settings.conflictResolution).onChange(async (value) => {
+    new import_obsidian5.Setting(containerEl).setName("Conflict Resolution").setDesc("How to handle sync conflicts").addDropdown((dropdown) => dropdown.addOption("local", "Keep local version").addOption("remote", "Keep remote version").addOption("manual", "Ask me each time").setValue(this.plugin.settings.conflictResolution).onChange(async (value) => {
       this.plugin.settings.conflictResolution = value;
       await this.plugin.saveSettings();
     }));
-    new import_obsidian4.Setting(containerEl).setName("Test Connection").setDesc("Test connection to sync server").addButton((button) => button.setButtonText("Test Connection").setCta().onClick(() => {
+    new import_obsidian5.Setting(containerEl).setName("Test Connection").setDesc("Test connection to sync server").addButton((button) => button.setButtonText("Test Connection").setCta().onClick(() => {
       this.plugin.testConnection();
     }));
   }
-  async updateAuthStatus() {
-    if (!this.authStatusEl)
-      return;
-    this.authStatusEl.setText("Checking...");
-    this.authStatusEl.style.color = "#888";
-    const status = await this.plugin.checkAuthStatus();
-    if (status.authenticated) {
-      this.authStatusEl.setText(`✓ Authenticated via ${status.method || "OAuth2"}`);
-      this.authStatusEl.style.color = "#4caf50";
-    } else {
-      this.authStatusEl.setText(`✗ Not authenticated - ${status.message || "Please authenticate with Google Drive"}`);
-      this.authStatusEl.style.color = "#f44336";
-    }
+}
+
+class OAuthCallbackModal extends import_obsidian5.Modal {
+  callback;
+  codeInput;
+  constructor(app, callback) {
+    super(app);
+    this.callback = callback;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.createEl("h2", { text: "Google Drive Authentication" });
+    contentEl.createEl("p", {
+      text: "After authorizing in your browser, Google will redirect you to a page with an authorization code. Please copy and paste that code here:"
+    });
+    this.codeInput = contentEl.createEl("input", {
+      type: "text",
+      placeholder: "Paste authorization code here"
+    });
+    this.codeInput.style.width = "100%";
+    this.codeInput.style.padding = "8px";
+    this.codeInput.style.marginTop = "10px";
+    this.codeInput.style.marginBottom = "20px";
+    const buttonContainer = contentEl.createDiv();
+    buttonContainer.style.display = "flex";
+    buttonContainer.style.justifyContent = "flex-end";
+    buttonContainer.style.gap = "10px";
+    const cancelButton = buttonContainer.createEl("button", { text: "Cancel" });
+    cancelButton.addEventListener("click", () => {
+      this.close();
+    });
+    const submitButton = buttonContainer.createEl("button", { text: "Submit", cls: "mod-cta" });
+    submitButton.addEventListener("click", async () => {
+      const code = this.codeInput.value.trim();
+      if (code) {
+        await this.callback(code);
+        this.close();
+      } else {
+        new import_obsidian5.Notice("Please enter the authorization code");
+      }
+    });
+    this.codeInput.addEventListener("keypress", async (e) => {
+      if (e.key === "Enter") {
+        const code = this.codeInput.value.trim();
+        if (code) {
+          await this.callback(code);
+          this.close();
+        }
+      }
+    });
+    setTimeout(() => this.codeInput.focus(), 100);
+  }
+  onClose() {
+    const { contentEl } = this;
+    contentEl.empty();
   }
 }

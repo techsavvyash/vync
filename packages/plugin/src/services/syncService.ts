@@ -1,6 +1,7 @@
-import { Vault, TFile, normalizePath } from 'obsidian'
+import { Vault, TFile, normalizePath, requestUrl } from 'obsidian'
 import { SyncStateManager } from './syncState'
 import { VaultScanner } from './vaultScanner'
+import { GoogleDriveAuthService } from './googleDriveAuth'
 
 export interface SyncResult {
   success: boolean
@@ -27,13 +28,41 @@ export class SyncService {
 	private vault: Vault
 	private syncStateManager?: SyncStateManager
 	private vaultScanner: VaultScanner
+	private authService?: GoogleDriveAuthService | null
 
-	constructor(serverUrl: string, vaultId: string, vault: Vault, syncStateManager?: SyncStateManager) {
+	constructor(
+		serverUrl: string,
+		vaultId: string,
+		vault: Vault,
+		syncStateManager?: SyncStateManager,
+		authService?: GoogleDriveAuthService | null
+	) {
 		this.serverUrl = serverUrl
 		this.vaultId = vaultId
 		this.vault = vault
 		this.syncStateManager = syncStateManager
 		this.vaultScanner = new VaultScanner(vault)
+		this.authService = authService
+	}
+
+	/**
+	 * Get authorization headers with Google Drive token
+	 */
+	private async getAuthHeaders(): Promise<Record<string, string>> {
+		const headers: Record<string, string> = {
+			'Content-Type': 'application/json'
+		}
+
+		if (this.authService?.isAuthenticated()) {
+			try {
+				const token = await this.authService.getValidAccessToken()
+				headers['Authorization'] = `Bearer ${token}`
+			} catch (error) {
+				console.error('Failed to get access token:', error)
+			}
+		}
+
+		return headers
 	}
 
 	async syncVault(): Promise<SyncResult> {
@@ -98,11 +127,10 @@ export class SyncService {
 
 			// Send local index to server for delta calculation
 			console.log('📡 Requesting delta from server...')
+			const authHeaders = await this.getAuthHeaders()
 			const deltaResponse = await fetch(`${this.serverUrl}/sync/delta`, {
 				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json'
-				},
+				headers: authHeaders,
 				body: JSON.stringify({
 					vaultId: this.vaultId,
 					localIndex: {
@@ -436,7 +464,10 @@ export class SyncService {
 
 	private async checkRemoteChanges(): Promise<any[]> {
 		try {
-			const response = await fetch(`${this.serverUrl}/sync/metadata/${this.vaultId}`)
+			const authHeaders = await this.getAuthHeaders()
+			const response = await fetch(`${this.serverUrl}/sync/metadata/${this.vaultId}`, {
+				headers: authHeaders
+			})
 
 			if (response.ok) {
 				const metadata = await response.json()
@@ -545,7 +576,10 @@ export class SyncService {
 					console.log(`  From remote ID: ${remoteFile.id}`)
 
 					// Download the file
-					const response = await fetch(`${this.serverUrl}/sync/download/${remoteFile.id}`)
+					const authHeaders = await this.getAuthHeaders()
+					const response = await fetch(`${this.serverUrl}/sync/download/${remoteFile.id}`, {
+						headers: authHeaders
+					})
 
 					if (response.status === 401) {
 						throw new Error('Authentication required. Please authenticate with Google Drive in plugin settings.')
@@ -632,7 +666,10 @@ export class SyncService {
 
 	public async getConflicts(): Promise<any[]> {
 		try {
-			const response = await fetch(`${this.serverUrl}/sync/conflicts`)
+			const authHeaders = await this.getAuthHeaders()
+			const response = await fetch(`${this.serverUrl}/sync/conflicts`, {
+				headers: authHeaders
+			})
 
 			if (response.ok) {
 				const result = await response.json()
@@ -652,9 +689,7 @@ export class SyncService {
 		try {
 			const response = await fetch(`${this.serverUrl}/sync/resolve-conflict`, {
 				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json'
-				},
+				headers: await this.getAuthHeaders(),
 				body: JSON.stringify({
 					conflictId,
 					strategy,
@@ -680,9 +715,7 @@ export class SyncService {
 		try {
 			const response = await fetch(`${this.serverUrl}/sync/auto-resolve`, {
 				method: 'POST',
-				headers: {
-					'Content-Type': 'application/json'
-				},
+				headers: await this.getAuthHeaders(),
 				body: JSON.stringify({
 					conflictId
 				})
@@ -728,7 +761,10 @@ export class SyncService {
 	// Method to get file changes from server
 	async getFileChanges(): Promise<any> {
 		try {
-			const response = await fetch(`${this.serverUrl}/sync/changes`)
+			const authHeaders = await this.getAuthHeaders()
+			const response = await fetch(`${this.serverUrl}/sync/changes`, {
+				headers: authHeaders
+			})
 
 			if (response.ok) {
 				return await response.json()
@@ -745,7 +781,10 @@ export class SyncService {
 	// Method to test server connection
 	async testConnection(): Promise<{ connected: boolean; message: string }> {
 		try {
-			const response = await fetch(`${this.serverUrl}/health`)
+			const authHeaders = await this.getAuthHeaders()
+			const response = await fetch(`${this.serverUrl}/health`, {
+				headers: authHeaders
+			})
 
 			if (response.ok) {
 				const health = await response.json()
@@ -1120,7 +1159,10 @@ export class SyncService {
 
 	// Download a single file from the server
 	private async downloadSingleFile(fileInfo: any): Promise<void> {
-		const response = await fetch(`${this.serverUrl}/sync/download/${fileInfo.id}`)
+		const authHeaders = await this.getAuthHeaders()
+		const response = await fetch(`${this.serverUrl}/sync/download/${fileInfo.id}`, {
+			headers: authHeaders
+		})
 
 		if (response.status === 401) {
 			throw new Error('Authentication required')

@@ -118,6 +118,23 @@ export class GoogleDriveService implements IDriveService {
     return this.oauth2Client?.credentials || null
   }
 
+  /**
+   * Set access token directly from Authorization header (for per-request auth)
+   * This allows using tokens from plugin without storing them on server
+   * No CLIENT_ID/CLIENT_SECRET needed - just uses the access token directly
+   */
+  public setAccessToken(accessToken: string): void {
+    // Create a minimal OAuth2 client just to hold the access token
+    // We don't need CLIENT_ID/CLIENT_SECRET since the token is already valid
+    const oauth2Client = new google.auth.OAuth2()
+    oauth2Client.setCredentials({
+      access_token: accessToken
+    })
+
+    this.drive = google.drive({ version: 'v3', auth: oauth2Client })
+    this.auth = oauth2Client
+  }
+
   private async getOrCreateVaultFolder(vaultId: string): Promise<string | null> {
     if (!this.drive) {
       console.error('  ❌ Drive not initialized')

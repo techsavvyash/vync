@@ -11,8 +11,25 @@ import type {
   FileSyncState
 } from '../types'
 import { DriveServiceFactory } from '../services/drive/DriveServiceFactory'
+import { GoogleDriveService } from '../services/drive/GoogleDriveService'
+
+// Middleware to extract and set access token from Authorization header
+const authMiddleware = ({ headers, store }: any) => {
+  const authHeader = headers.authorization || headers.Authorization
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const accessToken = authHeader.substring(7) // Remove 'Bearer ' prefix
+    const driveService = DriveServiceFactory.getDriveService()
+
+    // Set access token if this is a Google Drive service
+    if (driveService instanceof GoogleDriveService) {
+      driveService.setAccessToken(accessToken)
+      console.log('  🔑 Access token set from Authorization header')
+    }
+  }
+}
 
 export const syncRoutes = new Elysia({ prefix: '/sync' })
+  .onBeforeHandle(authMiddleware)
   .get('/', () => 'Sync API is ready')
   .post('/upload', async ({ body, store }) => {
     try {

@@ -1,21 +1,33 @@
-import { Plugin, Notice, PluginSettingTab, App, Setting, TFile, TAbstractFile } from 'obsidian'
+import { Plugin, Notice, PluginSettingTab, App, Setting, TFile, TAbstractFile, Modal } from 'obsidian'
 import { VaultWatcherService, VaultFileChange } from './services/vaultWatcher'
 import { SyncService, SyncResult } from './services/syncService'
 import { ConflictUIService } from './services/conflictUI'
 import { SyncStateManager } from './services/syncState'
 import { SyncIndexFile } from './services/syncIndexFile'
+import { GoogleDriveAuthService, GoogleDriveTokens } from './services/googleDriveAuth'
 
 interface ObsidianSyncSettings {
+	// Google Drive OAuth settings
+	googleClientId: string
+	googleClientSecret: string
+	googleTokens: GoogleDriveTokens | null
+
+	// Legacy server settings (kept for backward compatibility)
 	serverUrl: string
+
+	// Vault settings
 	vaultId: string
 	syncInterval: number
 	autoSync: boolean
 	conflictResolution: 'local' | 'remote' | 'manual'
-	syncState?: any // Persisted sync state
+	syncState?: any // Persisted sync state (deprecated, moved to JSON file)
 }
 
 const DEFAULT_SETTINGS: ObsidianSyncSettings = {
-	serverUrl: 'http://localhost:3000',
+	googleClientId: '',
+	googleClientSecret: '',
+	googleTokens: null,
+	serverUrl: 'http://localhost:3000', // Legacy
 	vaultId: '',
 	syncInterval: 30, // seconds
 	autoSync: true,
@@ -25,6 +37,11 @@ const DEFAULT_SETTINGS: ObsidianSyncSettings = {
 
 export default class ObsidianSyncPlugin extends Plugin {
 	settings: ObsidianSyncSettings = DEFAULT_SETTINGS
+
+	// Google Drive services
+	private googleAuthService: GoogleDriveAuthService | null = null
+
+	// Sync services
 	private syncTimer: NodeJS.Timeout | null = null
 	private remoteCheckTimer: NodeJS.Timeout | null = null // Scheduled remote check
 	private indexReconcileTimer: NodeJS.Timeout | null = null // Timer for index reconciliation
@@ -36,11 +53,14 @@ export default class ObsidianSyncPlugin extends Plugin {
 	private pendingChanges: Set<string> = new Set() // Track files with pending changes
 	private syncDebounceTimer: NodeJS.Timeout | null = null
 
+	// OAuth callback server
+	private callbackServer: any = null
+
 	async onload() {
 		await this.loadSettings()
 
-		// Check if server is running
-		this.checkServerAndNotify()
+		// Initialize Google Drive
+		await this.initializeGoogleDrive()
 
 		// Add ribbon icon
 		this.addRibbonIcon('sync', 'Obsidian Sync', () => {
@@ -123,7 +143,8 @@ export default class ObsidianSyncPlugin extends Plugin {
 				this.settings.serverUrl,
 				this.settings.vaultId,
 				this.app.vault,
-				this.syncStateManager
+				this.syncStateManager,
+				this.googleAuthService // Pass auth service to get tokens
 			)
 
 			// Initialize conflict UI service
@@ -279,6 +300,9 @@ export default class ObsidianSyncPlugin extends Plugin {
 	async saveSettings() {
 		await this.saveData(this.settings)
 
+		// Reinitialize Google Drive if credentials changed
+		await this.initializeGoogleDrive()
+
 		// Reinitialize services when settings change (especially vaultId or serverUrl)
 		await this.initializeServices()
 	}
@@ -288,6 +312,110 @@ export default class ObsidianSyncPlugin extends Plugin {
 		if (this.syncStateManager && this.syncIndexFile) {
 			const state = this.syncStateManager.getState()
 			await this.syncIndexFile.save(state)
+		}
+	}
+
+	/**
+	 * Initialize Google Drive authentication and client
+	 */
+	async initializeGoogleDrive() {
+		if (!this.settings.googleClientId || !this.settings.googleClientSecret) {
+			console.log('Google Drive credentials not configured')
+			return
+		}
+
+		try {
+			// Initialize auth service
+			this.googleAuthService = new GoogleDriveAuthService(
+				this.settings.googleClientId,
+				this.settings.googleClientSecret
+			)
+
+			// Restore tokens if available
+			if (this.settings.googleTokens) {
+				this.googleAuthService.setTokens(this.settings.googleTokens)
+				console.log('✅ Google Drive authentication restored from saved tokens')
+			}
+		} catch (error) {
+			console.error('Failed to initialize Google Drive:', error)
+			new Notice('Failed to initialize Google Drive: ' + (error as Error).message)
+		}
+	}
+
+	/**
+	 * Start OAuth flow
+	 */
+	async startGoogleDriveOAuth() {
+		if (!this.googleAuthService) {
+			new Notice('Please configure Google OAuth credentials first')
+			return
+		}
+
+		try {
+			const authUrl = this.googleAuthService.getAuthUrl()
+
+			// Open auth URL in browser
+			window.open(authUrl, '_blank')
+			new Notice('Opening Google authentication in browser...')
+
+			// Start local callback server to receive the OAuth code
+			await this.startOAuthCallbackServer()
+		} catch (error) {
+			console.error('OAuth error:', error)
+			new Notice('Failed to start OAuth: ' + (error as Error).message)
+		}
+	}
+
+	/**
+	 * Start a local HTTP server to receive OAuth callback
+	 */
+	async startOAuthCallbackServer() {
+		// For Obsidian plugin, we'll use a simpler approach:
+		// Show a modal for the user to paste the authorization code manually
+		const modal = new OAuthCallbackModal(this.app, async (code: string) => {
+			try {
+				if (!this.googleAuthService) {
+					throw new Error('Google Auth service not initialized')
+				}
+
+				new Notice('Exchanging authorization code...')
+				const tokens = await this.googleAuthService.exchangeCodeForTokens(code)
+
+				// Save tokens
+				this.settings.googleTokens = tokens
+				await this.saveData(this.settings)
+
+				new Notice('✅ Successfully authenticated with Google Drive!')
+				console.log('Google Drive authentication successful')
+			} catch (error) {
+				console.error('Failed to exchange auth code:', error)
+				new Notice('Authentication failed: ' + (error as Error).message)
+			}
+		})
+		modal.open()
+	}
+
+	/**
+	 * Check Google Drive authentication status
+	 */
+	isGoogleDriveAuthenticated(): boolean {
+		return this.googleAuthService?.isAuthenticated() || false
+	}
+
+	/**
+	 * Sign out from Google Drive
+	 */
+	async signOutGoogleDrive() {
+		if (this.googleAuthService) {
+			try {
+				await this.googleAuthService.revokeTokens()
+				this.settings.googleTokens = null
+				await this.saveData(this.settings)
+				new Notice('Signed out from Google Drive')
+			} catch (error) {
+				console.error('Failed to sign out:', error)
+				new Notice('Failed to sign out: ' + (error as Error).message)
+			}
 		}
 	}
 
@@ -541,36 +669,6 @@ export default class ObsidianSyncPlugin extends Plugin {
 		}
 	}
 
-	async checkAuthStatus(): Promise<{ authenticated: boolean; method?: string; message?: string }> {
-		try {
-			const response = await fetch(`${this.settings.serverUrl}/auth/status`)
-			if (response.ok) {
-				return await response.json()
-			} else {
-				return { authenticated: false, message: 'Failed to check auth status' }
-			}
-		} catch (error) {
-			return { authenticated: false, message: `Auth check failed: ${error}` }
-		}
-	}
-
-	openAuthPage() {
-		window.open(`${this.settings.serverUrl}/auth/google`, '_blank')
-		new Notice('Opening authentication page in browser...')
-	}
-
-	private async checkServerAndNotify() {
-		const authStatus = await this.checkAuthStatus()
-
-		if (!authStatus.authenticated) {
-			setTimeout(() => {
-				new Notice(
-					'Obsidian Sync: Server not connected. Please start the server and authenticate with Google Drive.',
-					10000
-				)
-			}, 2000)
-		}
-	}
 
 	// Method to be called when settings change
 	onSettingsChange() {
@@ -584,7 +682,6 @@ export default class ObsidianSyncPlugin extends Plugin {
 
 class ObsidianSyncSettingTab extends PluginSettingTab {
 	plugin: ObsidianSyncPlugin
-	private authStatusEl: HTMLElement | null = null
 
 	constructor(app: App, plugin: ObsidianSyncPlugin) {
 		super(app, plugin)
@@ -609,38 +706,63 @@ class ObsidianSyncSettingTab extends PluginSettingTab {
 				.onChange(async (value) => {
 					this.plugin.settings.serverUrl = value
 					await this.plugin.saveSettings()
-					// Refresh auth status when server URL changes
-					this.updateAuthStatus()
 				}))
 
-		// Authentication Status Section
-		containerEl.createEl('h3', { text: 'Authentication' })
+		// Google Drive Configuration Section
+		containerEl.createEl('h3', { text: 'Google Drive Configuration' })
+
+		new Setting(containerEl)
+			.setName('Google Client ID')
+			.setDesc('OAuth 2.0 Client ID from Google Cloud Console')
+			.addText(text => text
+				.setPlaceholder('Enter your Google Client ID')
+				.setValue(this.plugin.settings.googleClientId)
+				.onChange(async (value) => {
+					this.plugin.settings.googleClientId = value
+					await this.plugin.saveSettings()
+				}))
+
+		new Setting(containerEl)
+			.setName('Google Client Secret')
+			.setDesc('OAuth 2.0 Client Secret from Google Cloud Console')
+			.addText(text => {
+				text.setPlaceholder('Enter your Google Client Secret')
+					.setValue(this.plugin.settings.googleClientSecret)
+					.onChange(async (value) => {
+						this.plugin.settings.googleClientSecret = value
+						await this.plugin.saveSettings()
+					})
+				text.inputEl.type = 'password'
+				return text
+			})
+
+		// Google Drive Authentication Section
+		containerEl.createEl('h3', { text: 'Google Drive Authentication' })
 
 		// Auth status display
 		const authStatusSetting = new Setting(containerEl)
-			.setName('Google Drive Authentication')
-			.setDesc('Current authentication status')
-
-		this.authStatusEl = authStatusSetting.descEl.createDiv()
-		this.authStatusEl.setText('Checking authentication status...')
-
-		// Check auth button
-		authStatusSetting.addButton(button => button
-			.setButtonText('Check Status')
-			.onClick(async () => {
-				await this.updateAuthStatus()
-			}))
+			.setName('Authentication Status')
+			.setDesc(this.plugin.isGoogleDriveAuthenticated()
+				? '✓ Authenticated with Google Drive'
+				: '✗ Not authenticated')
 
 		// Authenticate button
-		authStatusSetting.addButton(button => button
-			.setButtonText('Authenticate')
-			.setCta()
-			.onClick(() => {
-				this.plugin.openAuthPage()
-			}))
-
-		// Initial auth status check
-		this.updateAuthStatus()
+		if (!this.plugin.isGoogleDriveAuthenticated()) {
+			authStatusSetting.addButton(button => button
+				.setButtonText('Authenticate with Google Drive')
+				.setCta()
+				.onClick(async () => {
+					await this.plugin.startGoogleDriveOAuth()
+				}))
+		} else {
+			authStatusSetting.addButton(button => button
+				.setButtonText('Sign Out')
+				.setWarning()
+				.onClick(async () => {
+					await this.plugin.signOutGoogleDrive()
+					this.display() // Refresh settings
+				}))
+		}
 
 		// Vault Configuration Section
 		containerEl.createEl('h3', { text: 'Vault Configuration' })
@@ -708,20 +830,76 @@ class ObsidianSyncSettingTab extends PluginSettingTab {
 				}))
 	}
 
-	async updateAuthStatus(): Promise<void> {
-		if (!this.authStatusEl) return
+}
 
-		this.authStatusEl.setText('Checking...')
-		this.authStatusEl.style.color = '#888'
+// OAuth Callback Modal for manual code entry
+class OAuthCallbackModal extends Modal {
+	private callback: (code: string) => Promise<void>
+	private codeInput: HTMLInputElement
 
-		const status = await this.plugin.checkAuthStatus()
+	constructor(app: App, callback: (code: string) => Promise<void>) {
+		super(app)
+		this.callback = callback
+	}
 
-		if (status.authenticated) {
-			this.authStatusEl.setText(`✓ Authenticated via ${status.method || 'OAuth2'}`)
-			this.authStatusEl.style.color = '#4caf50'
-		} else {
-			this.authStatusEl.setText(`✗ Not authenticated - ${status.message || 'Please authenticate with Google Drive'}`)
-			this.authStatusEl.style.color = '#f44336'
-		}
+	onOpen() {
+		const { contentEl } = this
+
+		contentEl.createEl('h2', { text: 'Google Drive Authentication' })
+
+		contentEl.createEl('p', {
+			text: 'After authorizing in your browser, Google will redirect you to a page with an authorization code. Please copy and paste that code here:'
+		})
+
+		// Create input for authorization code
+		this.codeInput = contentEl.createEl('input', {
+			type: 'text',
+			placeholder: 'Paste authorization code here'
+		})
+		this.codeInput.style.width = '100%'
+		this.codeInput.style.padding = '8px'
+		this.codeInput.style.marginTop = '10px'
+		this.codeInput.style.marginBottom = '20px'
+
+		// Add submit button
+		const buttonContainer = contentEl.createDiv()
+		buttonContainer.style.display = 'flex'
+		buttonContainer.style.justifyContent = 'flex-end'
+		buttonContainer.style.gap = '10px'
+
+		const cancelButton = buttonContainer.createEl('button', { text: 'Cancel' })
+		cancelButton.addEventListener('click', () => {
+			this.close()
+		})
+
+		const submitButton = buttonContainer.createEl('button', { text: 'Submit', cls: 'mod-cta' })
+		submitButton.addEventListener('click', async () => {
+			const code = this.codeInput.value.trim()
+			if (code) {
+				await this.callback(code)
+				this.close()
+			} else {
+				new Notice('Please enter the authorization code')
+			}
+		})
+
+		// Allow Enter key to submit
+		this.codeInput.addEventListener('keypress', async (e) => {
+			if (e.key === 'Enter') {
+				const code = this.codeInput.value.trim()
+				if (code) {
+					await this.callback(code)
+					this.close()
+				}
+			}
+		})
+
+		// Focus on input
+		setTimeout(() => this.codeInput.focus(), 100)
+	}
+
+	onClose() {
+		const { contentEl } = this
+		contentEl.empty()
 	}
 }
