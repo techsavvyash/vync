@@ -1,0 +1,85 @@
+name: Release Plugin
+
+on:
+  push:
+    branches:
+      - 'release/*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Extract version from branch
+        id: extract_version
+        run: |
+          BRANCH_NAME="${GITHUB_REF#refs/heads/}"
+          VERSION="${BRANCH_NAME#release/}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Extracted version: $VERSION"
+
+      - name: Check if tag already exists
+        id: check_tag
+        run: |
+          if git rev-parse --verify "refs/tags/${{ steps.extract_version.outputs.version }}" >/dev/null 2>&1; then
+            echo "tag_exists=true" >> $GITHUB_OUTPUT
+            echo "Tag ${{ steps.extract_version.outputs.version }} already exists"
+          else
+            echo "tag_exists=false" >> $GITHUB_OUTPUT
+            echo "Tag ${{ steps.extract_version.outputs.version }} does not exist"
+          fi
+
+      - name: Setup Bun
+        if: steps.check_tag.outputs.tag_exists == 'false'
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        if: steps.check_tag.outputs.tag_exists == 'false'
+        run: bun install
+
+      - name: Run tests
+        if: steps.check_tag.outputs.tag_exists == 'false'
+        run: cd packages/plugin && bun test
+
+      - name: Build plugin
+        if: steps.check_tag.outputs.tag_exists == 'false'
+        run: |
+          cd packages/plugin
+          bun run build
+
+      - name: Create and push tag
+        if: steps.check_tag.outputs.tag_exists == 'false'
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git tag -a "${{ steps.extract_version.outputs.version }}" -m "Release ${{ steps.extract_version.outputs.version }}"
+          git push origin "${{ steps.extract_version.outputs.version }}"
+
+      - name: Create GitHub release
+        if: steps.check_tag.outputs.tag_exists == 'false'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.extract_version.outputs.version }}"
+          cd packages/plugin
+
+          # Create release with plugin files
+          gh release create "$VERSION" \
+            --title="$VERSION" \
+            --notes="Release $VERSION - See CHANGELOG.md for details" \
+            --draft \
+            main.js manifest.json styles.css
+
+      - name: Skip release (tag exists)
+        if: steps.check_tag.outputs.tag_exists == 'true'
+        run: |
+          echo "Tag ${{ steps.extract_version.outputs.version }} already exists"
+          echo "If you want to re-release, delete the tag first: git push --delete origin ${{ steps.extract_version.outputs.version }}"
