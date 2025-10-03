@@ -324,6 +324,30 @@ class SyncService {
         }
       }
       console.log(`\uD83D\uDCCB Valid local files for sync: ${validLocalFiles.size} file(s)`);
+      console.log("\uD83D\uDD0D Scanning vault for new files not in index...");
+      const vaultFiles = await this.vaultScanner.scanVault({
+        includeExtensions: [".md", ".txt", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".svg"],
+        recursive: true
+      });
+      let newFilesFound = 0;
+      for (const vaultFile of vaultFiles) {
+        if (vaultFile.isFolder)
+          continue;
+        if (!validLocalFiles.has(vaultFile.path)) {
+          console.log(`  \uD83D\uDCC4 Found new file: ${vaultFile.path}`);
+          validLocalFiles.set(vaultFile.path, {
+            path: vaultFile.path,
+            lastSyncedHash: "",
+            lastSyncedTime: 0,
+            lastSyncedSize: 0,
+            remoteFileId: undefined
+          });
+          newFilesFound++;
+        }
+      }
+      if (newFilesFound > 0) {
+        console.log(`✅ Added ${newFilesFound} new file(s) to sync index`);
+      }
       console.log("\uD83D\uDCE1 Requesting delta from server...");
       const deltaResponse = await fetch(`${this.serverUrl}/sync/delta`, {
         method: "POST",
@@ -817,6 +841,143 @@ class SyncService {
   async syncOnChange(changedFiles) {
     console.log(`Sync triggered by changes to: ${changedFiles.join(", ")}`);
     await this.syncVault();
+  }
+  async handleFileCreation(filePath) {
+    console.log(`\uD83C\uDD95 Handling new file creation: ${filePath}`);
+    try {
+      const file = this.vault.getAbstractFileByPath(filePath);
+      if (!(file instanceof import_obsidian2.TFile)) {
+        console.log(`  ⚠️ Not a valid file: ${filePath}`);
+        return;
+      }
+      const extension = file.extension;
+      const relevantExtensions = ["md", "txt", "pdf", "png", "jpg", "jpeg", "gif", "svg"];
+      if (!relevantExtensions.includes(extension.toLowerCase())) {
+        console.log(`  ⏭️ Skipping non-relevant file type: ${extension}`);
+        return;
+      }
+      if (this.syncStateManager) {
+        const fileState = {
+          path: filePath,
+          lastSyncedHash: "",
+          lastSyncedTime: 0,
+          lastSyncedSize: 0,
+          remoteFileId: undefined
+        };
+        this.syncStateManager.getState().files.set(filePath, fileState);
+        console.log(`  ✅ Added new file to sync index: ${filePath}`);
+        await this.uploadSingleFile(file);
+        console.log(`  ✅ Uploaded new file: ${filePath}`);
+      }
+    } catch (error) {
+      console.error(`  ❌ Failed to handle file creation for ${filePath}:`, error);
+    }
+  }
+  async handleFileModification(filePath) {
+    console.log(`\uD83D\uDCDD Handling file modification: ${filePath}`);
+    try {
+      const file = this.vault.getAbstractFileByPath(filePath);
+      if (!(file instanceof import_obsidian2.TFile)) {
+        console.log(`  ⚠️ Not a valid file: ${filePath}`);
+        return;
+      }
+      const extension = file.extension;
+      const relevantExtensions = ["md", "txt", "pdf", "png", "jpg", "jpeg", "gif", "svg"];
+      if (!relevantExtensions.includes(extension.toLowerCase())) {
+        console.log(`  ⏭️ Skipping non-relevant file type: ${extension}`);
+        return;
+      }
+      if (this.syncStateManager) {
+        const isBinary = this.isBinaryFile(extension);
+        const content = isBinary ? await this.vault.readBinary(file) : await this.vault.read(file);
+        const hash = await this.computeHash(content);
+        const needsSync = this.syncStateManager.needsSync(filePath, hash, file.stat.mtime, file.stat.size);
+        if (needsSync) {
+          await this.uploadSingleFile(file);
+          console.log(`  ✅ Uploaded modified file: ${filePath}`);
+        } else {
+          console.log(`  ⏭️ File unchanged, skipping: ${filePath}`);
+        }
+      }
+    } catch (error) {
+      console.error(`  ❌ Failed to handle file modification for ${filePath}:`, error);
+    }
+  }
+  async handleFileDeletion(filePath) {
+    console.log(`\uD83D\uDDD1️ Handling file deletion: ${filePath}`);
+    try {
+      if (this.syncStateManager) {
+        this.syncStateManager.removeFile(filePath);
+        console.log(`  ✅ Removed file from sync index: ${filePath}`);
+      }
+    } catch (error) {
+      console.error(`  ❌ Failed to handle file deletion for ${filePath}:`, error);
+    }
+  }
+  async reconcileIndex() {
+    console.log("\uD83D\uDD0D Reconciling sync index with vault files...");
+    if (!this.syncStateManager) {
+      console.warn("  ⚠️ No sync state manager available");
+      return 0;
+    }
+    try {
+      const vaultFiles = await this.vaultScanner.scanVault({
+        includeExtensions: [".md", ".txt", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".svg"],
+        recursive: true
+      });
+      const currentIndex = this.syncStateManager.getState().files;
+      let newFilesFound = 0;
+      let staleEntriesRemoved = 0;
+      for (const vaultFile of vaultFiles) {
+        if (vaultFile.isFolder)
+          continue;
+        if (!currentIndex.has(vaultFile.path)) {
+          console.log(`  \uD83D\uDCC4 Found untracked file: ${vaultFile.path}`);
+          currentIndex.set(vaultFile.path, {
+            path: vaultFile.path,
+            lastSyncedHash: "",
+            lastSyncedTime: 0,
+            lastSyncedSize: 0,
+            remoteFileId: undefined
+          });
+          newFilesFound++;
+          try {
+            const file = this.vault.getAbstractFileByPath(vaultFile.path);
+            if (file instanceof import_obsidian2.TFile) {
+              await this.uploadSingleFile(file);
+              console.log(`    ✅ Uploaded untracked file: ${vaultFile.path}`);
+            }
+          } catch (error) {
+            console.error(`    ❌ Failed to upload untracked file ${vaultFile.path}:`, error);
+          }
+        }
+      }
+      const vaultFilePaths = new Set(vaultFiles.filter((f) => !f.isFolder).map((f) => f.path));
+      const indexPaths = Array.from(currentIndex.keys());
+      for (const indexPath of indexPaths) {
+        if (!vaultFilePaths.has(indexPath)) {
+          const fileState = currentIndex.get(indexPath);
+          if (!fileState?.remoteFileId || fileState?.lastSyncedHash === "") {
+            console.log(`  \uD83D\uDDD1️ Removing stale index entry: ${indexPath}`);
+            this.syncStateManager.removeFile(indexPath);
+            staleEntriesRemoved++;
+          } else {
+            console.log(`  ⚠️ File in index but not in vault (may need download): ${indexPath}`);
+          }
+        }
+      }
+      if (newFilesFound > 0 || staleEntriesRemoved > 0) {
+        console.log(`✅ Index reconciliation complete:`);
+        console.log(`   - ${newFilesFound} new file(s) added to index`);
+        console.log(`   - ${staleEntriesRemoved} stale entries removed`);
+      } else {
+        console.log("✅ Index is in sync with vault");
+      }
+      return newFilesFound;
+    } catch (error) {
+      console.error("❌ Failed to reconcile index:", error);
+      return 0;
+    }
   }
   async uploadSingleFile(file) {
     const isBinary = this.isBinaryFile(file.extension);
@@ -1627,6 +1788,7 @@ class ObsidianSyncPlugin extends import_obsidian4.Plugin {
   settings = DEFAULT_SETTINGS;
   syncTimer = null;
   remoteCheckTimer = null;
+  indexReconcileTimer = null;
   vaultWatcher = null;
   syncService = null;
   conflictUI = null;
@@ -1656,11 +1818,34 @@ class ObsidianSyncPlugin extends import_obsidian4.Plugin {
         this.testConnection();
       }
     });
+    this.addCommand({
+      id: "reconcile-index",
+      name: "Reconcile Sync Index",
+      callback: async () => {
+        if (this.syncService) {
+          new import_obsidian4.Notice("Reconciling sync index...");
+          try {
+            const newFiles = await this.syncService.reconcileIndex();
+            if (newFiles > 0) {
+              new import_obsidian4.Notice(`Found and uploaded ${newFiles} untracked file(s)`);
+              await this.saveSyncState();
+            } else {
+              new import_obsidian4.Notice("Index is already in sync");
+            }
+          } catch (error) {
+            new import_obsidian4.Notice("Failed to reconcile index: " + error.message);
+          }
+        } else {
+          new import_obsidian4.Notice("Sync service not initialized");
+        }
+      }
+    });
     console.log("Obsidian Sync plugin loaded");
   }
   onunload() {
     this.stopAutoSync();
     this.stopRemoteCheck();
+    this.stopIndexReconciliation();
     if (this.vaultWatcher) {
       this.vaultWatcher.stopWatching();
     }
@@ -1680,24 +1865,47 @@ class ObsidianSyncPlugin extends import_obsidian4.Plugin {
         new import_obsidian4.Notice(`Conflict resolved: ${result.resolution}`);
       });
       this.vaultWatcher = new VaultWatcherService(this.app.vault);
-      this.vaultWatcher.onChange((change) => {
+      this.vaultWatcher.onChange(async (change) => {
         if (change.isFolder) {
           console.log(`Folder ${change.changeType}: ${change.filePath}`);
           if (change.oldPath && change.changeType === "created") {
             if (this.syncStateManager) {
               this.syncStateManager.renameFolder(change.oldPath, change.filePath);
-              this.saveSyncState();
+              await this.saveSyncState();
             }
           } else if (change.changeType === "deleted") {
             if (this.syncStateManager) {
               this.syncStateManager.removeFolder(change.filePath);
+              await this.saveSyncState();
             }
           }
         } else {
           console.log(`File ${change.changeType}: ${change.filePath}`);
+          if (this.syncService && this.settings.autoSync) {
+            try {
+              switch (change.changeType) {
+                case "created":
+                  await this.syncService.handleFileCreation(change.filePath);
+                  await this.saveSyncState();
+                  break;
+                case "modified":
+                  await this.syncService.handleFileModification(change.filePath);
+                  await this.saveSyncState();
+                  break;
+                case "deleted":
+                  await this.syncService.handleFileDeletion(change.filePath);
+                  await this.saveSyncState();
+                  break;
+              }
+            } catch (error) {
+              console.error(`Failed to handle ${change.changeType} event for ${change.filePath}:`, error);
+              this.pendingChanges.add(change.filePath);
+            }
+          } else {
+            this.pendingChanges.add(change.filePath);
+          }
         }
-        this.pendingChanges.add(change.filePath);
-        if (this.settings.autoSync) {
+        if (this.settings.autoSync && this.pendingChanges.size > 0) {
           this.debouncedSync();
         }
       });
@@ -1706,6 +1914,7 @@ class ObsidianSyncPlugin extends import_obsidian4.Plugin {
         this.startAutoSync();
       }
       this.startRemoteCheck();
+      this.startIndexReconciliation();
       this.performInitialSync();
       new import_obsidian4.Notice("Obsidian Sync initialized successfully");
     } catch (error) {
@@ -1813,6 +2022,50 @@ class ObsidianSyncPlugin extends import_obsidian4.Plugin {
     if (this.remoteCheckTimer) {
       clearInterval(this.remoteCheckTimer);
       this.remoteCheckTimer = null;
+    }
+  }
+  startIndexReconciliation() {
+    if (this.indexReconcileTimer) {
+      clearInterval(this.indexReconcileTimer);
+    }
+    console.log("\uD83D\uDCCA Starting index reconciliation timer (every 5 minutes)...");
+    this.indexReconcileTimer = setInterval(async () => {
+      console.log("⏰ Index reconciliation timer fired");
+      if (!this.syncService) {
+        console.log("  ⚠️ Sync service not initialized, skipping");
+        return;
+      }
+      try {
+        const newFilesFound = await this.syncService.reconcileIndex();
+        if (newFilesFound > 0) {
+          console.log(`  ✅ Found and uploaded ${newFilesFound} untracked file(s)`);
+          new import_obsidian4.Notice(`Found and uploaded ${newFilesFound} untracked file(s)`);
+          await this.saveSyncState();
+        }
+      } catch (error) {
+        console.error("  ❌ Index reconciliation failed:", error);
+      }
+    }, 5 * 60 * 1000);
+    setTimeout(async () => {
+      if (this.syncService) {
+        console.log("\uD83D\uDD0D Running initial index reconciliation...");
+        try {
+          const newFilesFound = await this.syncService.reconcileIndex();
+          if (newFilesFound > 0) {
+            console.log(`✅ Initial reconciliation: Found ${newFilesFound} untracked file(s)`);
+            await this.saveSyncState();
+          }
+        } catch (error) {
+          console.error("❌ Initial index reconciliation failed:", error);
+        }
+      }
+    }, 5000);
+    console.log("✅ Index reconciliation timer started (every 5 minutes)");
+  }
+  stopIndexReconciliation() {
+    if (this.indexReconcileTimer) {
+      clearInterval(this.indexReconcileTimer);
+      this.indexReconcileTimer = null;
     }
   }
   async performInitialSync() {

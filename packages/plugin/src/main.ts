@@ -27,6 +27,7 @@ export default class ObsidianSyncPlugin extends Plugin {
 	settings: ObsidianSyncSettings = DEFAULT_SETTINGS
 	private syncTimer: NodeJS.Timeout | null = null
 	private remoteCheckTimer: NodeJS.Timeout | null = null // Scheduled remote check
+	private indexReconcileTimer: NodeJS.Timeout | null = null // Timer for index reconciliation
 	private vaultWatcher: VaultWatcherService | null = null
 	private syncService: SyncService | null = null
 	private conflictUI: ConflictUIService | null = null
@@ -69,12 +70,36 @@ export default class ObsidianSyncPlugin extends Plugin {
 			}
 		})
 
+		this.addCommand({
+			id: 'reconcile-index',
+			name: 'Reconcile Sync Index',
+			callback: async () => {
+				if (this.syncService) {
+					new Notice('Reconciling sync index...')
+					try {
+						const newFiles = await this.syncService.reconcileIndex()
+						if (newFiles > 0) {
+							new Notice(`Found and uploaded ${newFiles} untracked file(s)`)
+							await this.saveSyncState()
+						} else {
+							new Notice('Index is already in sync')
+						}
+					} catch (error) {
+						new Notice('Failed to reconcile index: ' + (error as Error).message)
+					}
+				} else {
+					new Notice('Sync service not initialized')
+				}
+			}
+		})
+
 		console.log('Obsidian Sync plugin loaded')
 	}
 
 	onunload() {
 		this.stopAutoSync()
 		this.stopRemoteCheck()
+		this.stopIndexReconciliation()
 		if (this.vaultWatcher) {
 			this.vaultWatcher.stopWatching()
 		}
@@ -114,7 +139,7 @@ export default class ObsidianSyncPlugin extends Plugin {
 			this.vaultWatcher = new VaultWatcherService(this.app.vault)
 
 			// Set up change listener
-			this.vaultWatcher.onChange((change: VaultFileChange) => {
+			this.vaultWatcher.onChange(async (change: VaultFileChange) => {
 				if (change.isFolder) {
 					// Handle folder changes
 					console.log(`Folder ${change.changeType}: ${change.filePath}`)
@@ -124,24 +149,56 @@ export default class ObsidianSyncPlugin extends Plugin {
 						if (this.syncStateManager) {
 							this.syncStateManager.renameFolder(change.oldPath, change.filePath)
 							// Save sync state after folder rename
-							this.saveSyncState()
+							await this.saveSyncState()
 						}
 					} else if (change.changeType === 'deleted') {
 						// Folder deleted
 						if (this.syncStateManager) {
 							this.syncStateManager.removeFolder(change.filePath)
+							await this.saveSyncState()
 						}
 					}
 				} else {
-					// Handle file changes
+					// Handle file changes with immediate sync for better responsiveness
 					console.log(`File ${change.changeType}: ${change.filePath}`)
+
+					// Handle individual file events immediately for real-time sync
+					if (this.syncService && this.settings.autoSync) {
+						try {
+							switch (change.changeType) {
+								case 'created':
+									// Immediately handle new file creation
+									await this.syncService.handleFileCreation(change.filePath)
+									await this.saveSyncState()
+									break
+
+								case 'modified':
+									// Immediately handle file modification
+									await this.syncService.handleFileModification(change.filePath)
+									await this.saveSyncState()
+									break
+
+								case 'deleted':
+									// Handle file deletion
+									await this.syncService.handleFileDeletion(change.filePath)
+									await this.saveSyncState()
+									break
+							}
+						} catch (error) {
+							console.error(`Failed to handle ${change.changeType} event for ${change.filePath}:`, error)
+							// Add to pending changes for retry in batch sync
+							this.pendingChanges.add(change.filePath)
+						}
+					} else {
+						// If auto-sync is off or service not ready, just track the change
+						this.pendingChanges.add(change.filePath)
+					}
 				}
 
-				// Add to pending changes
-				this.pendingChanges.add(change.filePath)
-
-				if (this.settings.autoSync) {
-					// Debounce sync to batch multiple rapid changes
+				// Still use debounced sync for batch operations and as a safety net
+				// This ensures any failures in immediate sync are retried
+				if (this.settings.autoSync && this.pendingChanges.size > 0) {
+					// Trigger a full sync after a delay to catch any missed changes
 					this.debouncedSync()
 				}
 			})
@@ -156,6 +213,9 @@ export default class ObsidianSyncPlugin extends Plugin {
 
 			// Start scheduled remote check (every 2 minutes)
 			this.startRemoteCheck()
+
+			// Start periodic index reconciliation (every 5 minutes)
+			this.startIndexReconciliation()
 
 			// Perform initial sync on startup to check for remote changes
 			this.performInitialSync()
@@ -307,6 +367,65 @@ export default class ObsidianSyncPlugin extends Plugin {
 		if (this.remoteCheckTimer) {
 			clearInterval(this.remoteCheckTimer)
 			this.remoteCheckTimer = null
+		}
+	}
+
+	private startIndexReconciliation() {
+		// Clear existing timer
+		if (this.indexReconcileTimer) {
+			clearInterval(this.indexReconcileTimer)
+		}
+
+		console.log('📊 Starting index reconciliation timer (every 5 minutes)...')
+
+		// Reconcile index every 5 minutes to catch any files created outside of Obsidian events
+		this.indexReconcileTimer = setInterval(async () => {
+			console.log('⏰ Index reconciliation timer fired')
+
+			if (!this.syncService) {
+				console.log('  ⚠️ Sync service not initialized, skipping')
+				return
+			}
+
+			try {
+				// Run index reconciliation
+				const newFilesFound = await this.syncService.reconcileIndex()
+
+				if (newFilesFound > 0) {
+					console.log(`  ✅ Found and uploaded ${newFilesFound} untracked file(s)`)
+					new Notice(`Found and uploaded ${newFilesFound} untracked file(s)`)
+
+					// Save the updated index
+					await this.saveSyncState()
+				}
+			} catch (error) {
+				console.error('  ❌ Index reconciliation failed:', error)
+			}
+		}, 5 * 60 * 1000) // Every 5 minutes
+
+		// Also run reconciliation immediately on startup after a short delay
+		setTimeout(async () => {
+			if (this.syncService) {
+				console.log('🔍 Running initial index reconciliation...')
+				try {
+					const newFilesFound = await this.syncService.reconcileIndex()
+					if (newFilesFound > 0) {
+						console.log(`✅ Initial reconciliation: Found ${newFilesFound} untracked file(s)`)
+						await this.saveSyncState()
+					}
+				} catch (error) {
+					console.error('❌ Initial index reconciliation failed:', error)
+				}
+			}
+		}, 5000) // 5 seconds after startup
+
+		console.log('✅ Index reconciliation timer started (every 5 minutes)')
+	}
+
+	private stopIndexReconciliation() {
+		if (this.indexReconcileTimer) {
+			clearInterval(this.indexReconcileTimer)
+			this.indexReconcileTimer = null
 		}
 	}
 

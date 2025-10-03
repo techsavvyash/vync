@@ -67,6 +67,35 @@ export class SyncService {
 
 			console.log(`📋 Valid local files for sync: ${validLocalFiles.size} file(s)`)
 
+			// IMPORTANT: Scan vault for files NOT in the index (new files)
+			console.log('🔍 Scanning vault for new files not in index...')
+			const vaultFiles = await this.vaultScanner.scanVault({
+				includeExtensions: ['.md', '.txt', '.pdf', '.png', '.jpg', '.jpeg', '.gif', '.svg'],
+				recursive: true
+			})
+
+			let newFilesFound = 0
+			for (const vaultFile of vaultFiles) {
+				if (vaultFile.isFolder) continue
+
+				if (!validLocalFiles.has(vaultFile.path)) {
+					// This is a new file not in the index - add it with empty state
+					console.log(`  📄 Found new file: ${vaultFile.path}`)
+					validLocalFiles.set(vaultFile.path, {
+						path: vaultFile.path,
+						lastSyncedHash: '', // Empty = never synced
+						lastSyncedTime: 0,
+						lastSyncedSize: 0,
+						remoteFileId: undefined
+					})
+					newFilesFound++
+				}
+			}
+
+			if (newFilesFound > 0) {
+				console.log(`✅ Added ${newFilesFound} new file(s) to sync index`)
+			}
+
 			// Send local index to server for delta calculation
 			console.log('📡 Requesting delta from server...')
 			const deltaResponse = await fetch(`${this.serverUrl}/sync/delta`, {
@@ -707,6 +736,201 @@ export class SyncService {
 
 		// For now, do a full sync. In the future, we could optimize to only sync changed files
 		await this.syncVault()
+	}
+
+	// Method to handle individual file creation events
+	async handleFileCreation(filePath: string): Promise<void> {
+		console.log(`🆕 Handling new file creation: ${filePath}`)
+
+		try {
+			const file = this.vault.getAbstractFileByPath(filePath)
+			if (!(file instanceof TFile)) {
+				console.log(`  ⚠️ Not a valid file: ${filePath}`)
+				return
+			}
+
+			// Check if it's a relevant file type
+			const extension = file.extension
+			const relevantExtensions = ['md', 'txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 'svg']
+			if (!relevantExtensions.includes(extension.toLowerCase())) {
+				console.log(`  ⏭️ Skipping non-relevant file type: ${extension}`)
+				return
+			}
+
+			// Add to index with empty sync state (will be uploaded on next sync)
+			if (this.syncStateManager) {
+				// Add file to index with empty state to mark it for upload
+				const fileState = {
+					path: filePath,
+					lastSyncedHash: '', // Empty = never synced
+					lastSyncedTime: 0,
+					lastSyncedSize: 0,
+					remoteFileId: undefined
+				}
+
+				// Update the sync state manager's internal state
+				this.syncStateManager.getState().files.set(filePath, fileState)
+				console.log(`  ✅ Added new file to sync index: ${filePath}`)
+
+				// Immediately upload the new file
+				await this.uploadSingleFile(file)
+				console.log(`  ✅ Uploaded new file: ${filePath}`)
+			}
+		} catch (error) {
+			console.error(`  ❌ Failed to handle file creation for ${filePath}:`, error)
+		}
+	}
+
+	// Method to handle individual file modification events
+	async handleFileModification(filePath: string): Promise<void> {
+		console.log(`📝 Handling file modification: ${filePath}`)
+
+		try {
+			const file = this.vault.getAbstractFileByPath(filePath)
+			if (!(file instanceof TFile)) {
+				console.log(`  ⚠️ Not a valid file: ${filePath}`)
+				return
+			}
+
+			// Check if it's a relevant file type
+			const extension = file.extension
+			const relevantExtensions = ['md', 'txt', 'pdf', 'png', 'jpg', 'jpeg', 'gif', 'svg']
+			if (!relevantExtensions.includes(extension.toLowerCase())) {
+				console.log(`  ⏭️ Skipping non-relevant file type: ${extension}`)
+				return
+			}
+
+			// Check if file needs sync
+			if (this.syncStateManager) {
+				const isBinary = this.isBinaryFile(extension)
+				const content = isBinary ? await this.vault.readBinary(file) : await this.vault.read(file)
+				const hash = await this.computeHash(content)
+
+				const needsSync = this.syncStateManager.needsSync(
+					filePath,
+					hash,
+					file.stat.mtime,
+					file.stat.size
+				)
+
+				if (needsSync) {
+					// Upload the modified file immediately
+					await this.uploadSingleFile(file)
+					console.log(`  ✅ Uploaded modified file: ${filePath}`)
+				} else {
+					console.log(`  ⏭️ File unchanged, skipping: ${filePath}`)
+				}
+			}
+		} catch (error) {
+			console.error(`  ❌ Failed to handle file modification for ${filePath}:`, error)
+		}
+	}
+
+	// Method to handle file deletion events
+	async handleFileDeletion(filePath: string): Promise<void> {
+		console.log(`🗑️ Handling file deletion: ${filePath}`)
+
+		try {
+			if (this.syncStateManager) {
+				// Remove from local index
+				this.syncStateManager.removeFile(filePath)
+				console.log(`  ✅ Removed file from sync index: ${filePath}`)
+
+				// TODO: Also delete from Google Drive if needed
+				// This would require implementing a delete endpoint on the server
+			}
+		} catch (error) {
+			console.error(`  ❌ Failed to handle file deletion for ${filePath}:`, error)
+		}
+	}
+
+	// Method to reconcile index with actual vault files
+	// This ensures any files created outside of Obsidian events are tracked
+	async reconcileIndex(): Promise<number> {
+		console.log('🔍 Reconciling sync index with vault files...')
+
+		if (!this.syncStateManager) {
+			console.warn('  ⚠️ No sync state manager available')
+			return 0
+		}
+
+		try {
+			// Scan vault for all relevant files
+			const vaultFiles = await this.vaultScanner.scanVault({
+				includeExtensions: ['.md', '.txt', '.pdf', '.png', '.jpg', '.jpeg', '.gif', '.svg'],
+				recursive: true
+			})
+
+			const currentIndex = this.syncStateManager.getState().files
+			let newFilesFound = 0
+			let staleEntriesRemoved = 0
+
+			// Check for files in vault but not in index
+			for (const vaultFile of vaultFiles) {
+				if (vaultFile.isFolder) continue
+
+				if (!currentIndex.has(vaultFile.path)) {
+					console.log(`  📄 Found untracked file: ${vaultFile.path}`)
+
+					// Add to index with empty state (will be uploaded on next sync)
+					currentIndex.set(vaultFile.path, {
+						path: vaultFile.path,
+						lastSyncedHash: '', // Empty = never synced
+						lastSyncedTime: 0,
+						lastSyncedSize: 0,
+						remoteFileId: undefined
+					})
+					newFilesFound++
+
+					// Immediately upload the file
+					try {
+						const file = this.vault.getAbstractFileByPath(vaultFile.path)
+						if (file instanceof TFile) {
+							await this.uploadSingleFile(file)
+							console.log(`    ✅ Uploaded untracked file: ${vaultFile.path}`)
+						}
+					} catch (error) {
+						console.error(`    ❌ Failed to upload untracked file ${vaultFile.path}:`, error)
+					}
+				}
+			}
+
+			// Check for stale entries in index (files that no longer exist)
+			const vaultFilePaths = new Set(vaultFiles.filter(f => !f.isFolder).map(f => f.path))
+			const indexPaths = Array.from(currentIndex.keys())
+
+			for (const indexPath of indexPaths) {
+				if (!vaultFilePaths.has(indexPath)) {
+					// File exists in index but not in vault
+					const fileState = currentIndex.get(indexPath)
+
+					// Only remove if it doesn't have a remote file ID (hasn't been synced)
+					// or if we're sure it's been deleted locally
+					if (!fileState?.remoteFileId || fileState?.lastSyncedHash === '') {
+						console.log(`  🗑️ Removing stale index entry: ${indexPath}`)
+						this.syncStateManager.removeFile(indexPath)
+						staleEntriesRemoved++
+					} else {
+						// File has been synced before but is missing locally
+						// This might be a file that should be downloaded
+						console.log(`  ⚠️ File in index but not in vault (may need download): ${indexPath}`)
+					}
+				}
+			}
+
+			if (newFilesFound > 0 || staleEntriesRemoved > 0) {
+				console.log(`✅ Index reconciliation complete:`)
+				console.log(`   - ${newFilesFound} new file(s) added to index`)
+				console.log(`   - ${staleEntriesRemoved} stale entries removed`)
+			} else {
+				console.log('✅ Index is in sync with vault')
+			}
+
+			return newFilesFound
+		} catch (error) {
+			console.error('❌ Failed to reconcile index:', error)
+			return 0
+		}
 	}
 
 	// Upload a single file to the server
