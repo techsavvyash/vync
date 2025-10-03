@@ -640,12 +640,12 @@ export class SyncService {
 					continue
 				}
 
-				if (!currentIndex.has(vaultFile.path)) {
-					console.log(`  📄 Found untracked file: ${vaultFile.path}`)
+				if (!currentIndex.has(vaultItem.path)) {
+					console.log(`  📄 Found untracked file: ${vaultItem.path}`)
 
 					// Add to index with empty state (will be uploaded on next sync)
-					currentIndex.set(vaultFile.path, {
-						path: vaultFile.path,
+					currentIndex.set(vaultItem.path, {
+						path: vaultItem.path,
 						lastSyncedHash: '', // Empty = never synced
 						lastSyncedTime: 0,
 						lastSyncedSize: 0,
@@ -655,13 +655,13 @@ export class SyncService {
 
 					// Immediately upload the file
 					try {
-						const file = this.vault.getAbstractFileByPath(vaultFile.path)
+						const file = this.vault.getAbstractFileByPath(vaultItem.path)
 						if (file instanceof TFile) {
 							await this.uploadSingleFile(file)
-							console.log(`    ✅ Uploaded untracked file: ${vaultFile.path}`)
+							console.log(`    ✅ Uploaded untracked file: ${vaultItem.path}`)
 						}
 					} catch (error) {
-						console.error(`    ❌ Failed to upload untracked file ${vaultFile.path}:`, error)
+						console.error(`    ❌ Failed to upload untracked file ${vaultItem.path}:`, error)
 					}
 				}
 			}

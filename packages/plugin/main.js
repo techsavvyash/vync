@@ -730,13 +730,13 @@ class SyncService {
         recursive: true
       });
       let newFilesFound = 0;
-      for (const vaultFile2 of vaultFiles) {
-        if (vaultFile2.isFolder)
+      for (const vaultFile of vaultFiles) {
+        if (vaultFile.isFolder)
           continue;
-        if (!validLocalFiles.has(vaultFile2.path)) {
-          console.log(`  \uD83D\uDCC4 Found new file: ${vaultFile2.path}`);
-          validLocalFiles.set(vaultFile2.path, {
-            path: vaultFile2.path,
+        if (!validLocalFiles.has(vaultFile.path)) {
+          console.log(`  \uD83D\uDCC4 Found new file: ${vaultFile.path}`);
+          validLocalFiles.set(vaultFile.path, {
+            path: vaultFile.path,
             lastSyncedHash: "",
             lastSyncedTime: 0,
             lastSyncedSize: 0,
@@ -1103,10 +1103,10 @@ class SyncService {
           }
           continue;
         }
-        if (!currentIndex.has(vaultFile.path)) {
-          console.log(`  \uD83D\uDCC4 Found untracked file: ${vaultFile.path}`);
-          currentIndex.set(vaultFile.path, {
-            path: vaultFile.path,
+        if (!currentIndex.has(vaultItem.path)) {
+          console.log(`  \uD83D\uDCC4 Found untracked file: ${vaultItem.path}`);
+          currentIndex.set(vaultItem.path, {
+            path: vaultItem.path,
             lastSyncedHash: "",
             lastSyncedTime: 0,
             lastSyncedSize: 0,
@@ -1114,13 +1114,13 @@ class SyncService {
           });
           newFilesFound++;
           try {
-            const file = this.vault.getAbstractFileByPath(vaultFile.path);
+            const file = this.vault.getAbstractFileByPath(vaultItem.path);
             if (file instanceof import_obsidian3.TFile) {
               await this.uploadSingleFile(file);
-              console.log(`    ✅ Uploaded untracked file: ${vaultFile.path}`);
+              console.log(`    ✅ Uploaded untracked file: ${vaultItem.path}`);
             }
           } catch (error) {
-            console.error(`    ❌ Failed to upload untracked file ${vaultFile.path}:`, error);
+            console.error(`    ❌ Failed to upload untracked file ${vaultItem.path}:`, error);
           }
         }
       }
