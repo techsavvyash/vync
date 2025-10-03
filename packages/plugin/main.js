@@ -543,6 +543,21 @@ class SyncService {
     }
     return btoa(binary);
   }
+  async ensureParentFoldersExist(filePath) {
+    const normalizedPath = import_obsidian2.normalizePath(filePath);
+    const parentPath = normalizedPath.substring(0, normalizedPath.lastIndexOf("/"));
+    if (parentPath && !this.vault.getAbstractFileByPath(parentPath)) {
+      const parts = parentPath.split("/");
+      let currentPath = "";
+      for (const part of parts) {
+        currentPath = currentPath ? `${currentPath}/${part}` : part;
+        if (!this.vault.getAbstractFileByPath(currentPath)) {
+          await this.vault.createFolder(currentPath);
+          console.log(`  \uD83D\uDCC1 Created folder: ${currentPath}`);
+        }
+      }
+    }
+  }
   async uploadFiles(files) {
     const results = [];
     for (const file of files) {
@@ -663,6 +678,8 @@ class SyncService {
           continue;
         }
         if (shouldDownload) {
+          console.log(`⬇️  Starting download: ${normalizedPath}`);
+          console.log(`  From remote ID: ${remoteFile.id}`);
           const response = await fetch(`${this.serverUrl}/sync/download/${remoteFile.id}`);
           if (response.status === 401) {
             throw new Error("Authentication required. Please authenticate with Google Drive in plugin settings.");
@@ -687,6 +704,7 @@ class SyncService {
                 }
                 console.log(`Updated: ${remoteFile.filePath}`);
               } else {
+                await this.ensureParentFoldersExist(normalizedPath);
                 if (isBinary) {
                   const binaryString = atob(base64Data);
                   const bytes = new Uint8Array(binaryString.length);

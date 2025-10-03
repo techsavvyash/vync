@@ -343,6 +343,25 @@ export class SyncService {
 		return btoa(binary)
 	}
 
+	// Helper function to ensure parent folders exist before creating a file
+	private async ensureParentFoldersExist(filePath: string): Promise<void> {
+		const normalizedPath = normalizePath(filePath)
+		const parentPath = normalizedPath.substring(0, normalizedPath.lastIndexOf('/'))
+
+		if (parentPath && !this.vault.getAbstractFileByPath(parentPath)) {
+			// Create parent directories recursively
+			const parts = parentPath.split('/')
+			let currentPath = ''
+			for (const part of parts) {
+				currentPath = currentPath ? `${currentPath}/${part}` : part
+				if (!this.vault.getAbstractFileByPath(currentPath)) {
+					await this.vault.createFolder(currentPath)
+					console.log(`  📁 Created folder: ${currentPath}`)
+				}
+			}
+		}
+	}
+
 	private async uploadFiles(files: SyncFile[]): Promise<any[]> {
 		const results: any[] = []
 
@@ -522,6 +541,9 @@ export class SyncService {
 				}
 
 				if (shouldDownload) {
+					console.log(`⬇️  Starting download: ${normalizedPath}`)
+					console.log(`  From remote ID: ${remoteFile.id}`)
+
 					// Download the file
 					const response = await fetch(`${this.serverUrl}/sync/download/${remoteFile.id}`)
 
@@ -552,7 +574,9 @@ export class SyncService {
 								}
 								console.log(`Updated: ${remoteFile.filePath}`)
 							} else {
-								// Create new file
+								// Create new file - ensure parent folders exist first
+								await this.ensureParentFoldersExist(normalizedPath)
+
 								if (isBinary) {
 									const binaryString = atob(base64Data)
 									const bytes = new Uint8Array(binaryString.length)

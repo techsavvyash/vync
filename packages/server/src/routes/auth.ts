@@ -5,7 +5,7 @@ import { promises as fs } from 'fs'
 import path from 'path'
 
 export const authRoutes = new Elysia({ prefix: '/auth' })
-  .get('/google', async () => {
+  .get('/google', async ({ request }) => {
     try {
       const driveService = DriveServiceFactory.getDriveService()
 
@@ -16,7 +16,13 @@ export const authRoutes = new Elysia({ prefix: '/auth' })
         }
       }
 
-      const authUrl = driveService.getAuthUrl()
+      // Auto-detect redirect URI from request if not set in environment
+      const redirectUri = process.env.GOOGLE_REDIRECT_URI ||
+        `${request.url.split('/auth')[0]}/auth/google/callback`
+
+      console.log('🔗 OAuth Redirect URI:', redirectUri)
+
+      const authUrl = driveService.getAuthUrl(redirectUri)
 
       // Return HTML page with redirect
       return new Response(`

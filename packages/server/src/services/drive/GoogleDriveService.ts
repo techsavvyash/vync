@@ -25,12 +25,13 @@ export class GoogleDriveService implements IDriveService {
 
   /**
    * Get OAuth2 client for user authentication
+   * @param redirectUri Optional redirect URI (auto-detected from request if not provided)
    */
-  public getOAuth2Client() {
-    if (!this.oauth2Client) {
+  public getOAuth2Client(redirectUri?: string) {
+    // Always recreate if redirectUri is provided (for dynamic URLs)
+    if (redirectUri && this.oauth2Client) {
       const clientId = process.env.GOOGLE_CLIENT_ID
       const clientSecret = process.env.GOOGLE_CLIENT_SECRET
-      const redirectUri = process.env.GOOGLE_REDIRECT_URI || 'http://localhost:3000/auth/google/callback'
 
       if (!clientId || !clientSecret) {
         console.warn('OAuth2 credentials not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET')
@@ -38,15 +39,32 @@ export class GoogleDriveService implements IDriveService {
       }
 
       this.oauth2Client = new google.auth.OAuth2(clientId, clientSecret, redirectUri)
+      return this.oauth2Client
+    }
+
+    if (!this.oauth2Client) {
+      const clientId = process.env.GOOGLE_CLIENT_ID
+      const clientSecret = process.env.GOOGLE_CLIENT_SECRET
+
+      // Use environment variable or default to localhost for development
+      const defaultRedirectUri = process.env.GOOGLE_REDIRECT_URI || 'http://localhost:3000/auth/google/callback'
+
+      if (!clientId || !clientSecret) {
+        console.warn('OAuth2 credentials not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET')
+        return null
+      }
+
+      this.oauth2Client = new google.auth.OAuth2(clientId, clientSecret, redirectUri || defaultRedirectUri)
     }
     return this.oauth2Client
   }
 
   /**
    * Generate OAuth2 authorization URL
+   * @param redirectUri Optional redirect URI for dynamic URL generation
    */
-  public getAuthUrl(): string {
-    const oauth2Client = this.getOAuth2Client()
+  public getAuthUrl(redirectUri?: string): string {
+    const oauth2Client = this.getOAuth2Client(redirectUri)
     if (!oauth2Client) {
       throw new Error('OAuth2 not configured')
     }
