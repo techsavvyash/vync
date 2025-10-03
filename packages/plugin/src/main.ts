@@ -12,9 +12,6 @@ interface ObsidianSyncSettings {
 	googleClientSecret: string
 	googleTokens: GoogleDriveTokens | null
 
-	// Legacy server settings (kept for backward compatibility)
-	serverUrl: string
-
 	// Vault settings
 	vaultId: string
 	syncInterval: number
@@ -27,7 +24,6 @@ const DEFAULT_SETTINGS: ObsidianSyncSettings = {
 	googleClientId: '',
 	googleClientSecret: '',
 	googleTokens: null,
-	serverUrl: 'http://localhost:3000', // Legacy
 	vaultId: '',
 	syncInterval: 30, // seconds
 	autoSync: true,
@@ -84,9 +80,13 @@ export default class ObsidianSyncPlugin extends Plugin {
 
 		this.addCommand({
 			id: 'test-connection',
-			name: 'Test Server Connection',
-			callback: () => {
-				this.testConnection()
+			name: 'Test Google Drive Connection',
+			callback: async () => {
+				if (this.googleAuthService?.isAuthenticated()) {
+					new Notice('✓ Google Drive is authenticated and ready')
+				} else {
+					new Notice('✗ Google Drive not authenticated. Please authenticate in plugin settings.')
+				}
 			}
 		})
 
@@ -129,8 +129,14 @@ export default class ObsidianSyncPlugin extends Plugin {
 	private async initializeServices() {
 		try {
 			console.log('Initializing services...')
-			console.log('  Server URL:', this.settings.serverUrl)
 			console.log('  Vault ID:', this.settings.vaultId || '(not set)')
+
+			// Check if Google Drive is authenticated
+			if (!this.googleAuthService?.isAuthenticated()) {
+				console.warn('⚠️  Google Drive not authenticated - sync will not work')
+				new Notice('Please authenticate with Google Drive in plugin settings')
+				return
+			}
 
 			// Initialize sync index file manager
 			this.syncIndexFile = new SyncIndexFile(this.app.vault)
@@ -139,12 +145,12 @@ export default class ObsidianSyncPlugin extends Plugin {
 			await this.loadSyncState()
 
 			// Initialize sync service with vault reference and state manager
+			// Note: No server URL needed - connects directly to Google Drive
 			this.syncService = new SyncService(
-				this.settings.serverUrl,
 				this.settings.vaultId,
 				this.app.vault,
-				this.syncStateManager,
-				this.googleAuthService // Pass auth service to get tokens
+				this.googleAuthService,
+				this.syncStateManager
 			)
 
 			// Initialize conflict UI service
@@ -651,23 +657,6 @@ export default class ObsidianSyncPlugin extends Plugin {
 		}
 	}
 
-	async testConnection() {
-		if (!this.syncService) {
-			new Notice('Sync service not initialized')
-			return
-		}
-
-		try {
-			const connection = await this.syncService.testConnection()
-			if (connection.connected) {
-				new Notice(`Server connection successful: ${connection.message}`)
-			} else {
-				new Notice(`Server connection failed: ${connection.message}`)
-			}
-		} catch (error) {
-			new Notice('Connection test failed: ' + (error as Error).message)
-		}
-	}
 
 
 	// Method to be called when settings change
@@ -694,19 +683,11 @@ class ObsidianSyncSettingTab extends PluginSettingTab {
 
 		containerEl.createEl('h2', { text: 'Obsidian Sync Settings' })
 
-		// Server Configuration Section
-		containerEl.createEl('h3', { text: 'Server Configuration' })
-
-		new Setting(containerEl)
-			.setName('Server URL')
-			.setDesc('URL of the sync server')
-			.addText(text => text
-				.setPlaceholder('http://localhost:3000')
-				.setValue(this.plugin.settings.serverUrl)
-				.onChange(async (value) => {
-					this.plugin.settings.serverUrl = value
-					await this.plugin.saveSettings()
-				}))
+		// Info message about serverless architecture
+		containerEl.createEl('p', {
+			text: 'This plugin syncs your vault directly to Google Drive. No server required!',
+			cls: 'setting-item-description'
+		})
 
 		// Google Drive Configuration Section
 		containerEl.createEl('h3', { text: 'Google Drive Configuration' })

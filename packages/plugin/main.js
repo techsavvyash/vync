@@ -32,7 +32,7 @@ __export(exports_main, {
   default: () => ObsidianSyncPlugin
 });
 module.exports = __toCommonJS(exports_main);
-var import_obsidian5 = require("obsidian");
+var import_obsidian6 = require("obsidian");
 
 // src/services/vaultWatcher.ts
 var import_obsidian = require("obsidian");
@@ -161,7 +161,7 @@ class VaultWatcherService {
 }
 
 // src/services/syncService.ts
-var import_obsidian2 = require("obsidian");
+var import_obsidian3 = require("obsidian");
 
 // src/services/vaultScanner.ts
 class VaultScanner {
@@ -290,43 +290,427 @@ class VaultScanner {
   }
 }
 
+// src/services/googleDriveService.ts
+var import_obsidian2 = require("obsidian");
+
+class GoogleDriveService {
+  authService;
+  vaultFolderCache = new Map;
+  constructor(authService) {
+    this.authService = authService;
+  }
+  async isAuthenticated() {
+    return this.authService.isAuthenticated();
+  }
+  async getOrCreateVaultFolder(vaultId) {
+    console.log("  \uD83D\uDCC1 Getting/creating vault folder...");
+    console.log("    Vault ID:", vaultId);
+    if (this.vaultFolderCache.has(vaultId)) {
+      const cachedId = this.vaultFolderCache.get(vaultId);
+      console.log("    ✓ Found in cache:", cachedId);
+      return cachedId;
+    }
+    try {
+      const folderName = `vault_${vaultId}`;
+      console.log("    Searching for folder:", folderName);
+      const accessToken = await this.authService.getValidAccessToken();
+      const searchUrl = `https://www.googleapis.com/drive/v3/files?q=name='${folderName}' and mimeType='application/vnd.google-apps.folder' and trashed=false&fields=files(id,name)`;
+      const response = await import_obsidian2.requestUrl({
+        url: searchUrl,
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${accessToken}`
+        }
+      });
+      const files = response.json.files || [];
+      if (files.length > 0) {
+        const folderId2 = files[0].id;
+        console.log("    ✓ Found existing folder:", folderId2);
+        if (files.length > 1) {
+          console.log("    \uD83D\uDDD1️  Found", files.length - 1, "duplicate folder(s), deleting...");
+          for (let i = 1;i < files.length; i++) {
+            try {
+              await this.deleteFile(files[i].id);
+              console.log("    ✓ Deleted duplicate folder:", files[i].id);
+            } catch (err) {
+              console.warn("    ⚠️  Failed to delete duplicate folder:", err);
+            }
+          }
+        }
+        this.vaultFolderCache.set(vaultId, folderId2);
+        return folderId2;
+      }
+      console.log("    Creating new folder:", folderName);
+      const createResponse = await import_obsidian2.requestUrl({
+        url: "https://www.googleapis.com/drive/v3/files",
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          name: folderName,
+          mimeType: "application/vnd.google-apps.folder"
+        })
+      });
+      const folderId = createResponse.json.id;
+      console.log("    ✓ Created new folder:", folderId);
+      this.vaultFolderCache.set(vaultId, folderId);
+      return folderId;
+    } catch (error) {
+      console.error("    ❌ Error getting/creating vault folder:", error);
+      return null;
+    }
+  }
+  async createFolder(folderName, parentFolderId) {
+    try {
+      const accessToken = await this.authService.getValidAccessToken();
+      const metadata = {
+        name: folderName,
+        mimeType: "application/vnd.google-apps.folder"
+      };
+      if (parentFolderId) {
+        metadata.parents = [parentFolderId];
+      }
+      const response = await import_obsidian2.requestUrl({
+        url: "https://www.googleapis.com/drive/v3/files",
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(metadata)
+      });
+      console.log(`    \uD83D\uDCC1 Created folder: ${folderName} (ID: ${response.json.id})`);
+      return response.json.id;
+    } catch (error) {
+      console.error("Error creating folder:", error);
+      return null;
+    }
+  }
+  async ensureFolderPath(folderPath, parentFolderId) {
+    if (!folderPath) {
+      return parentFolderId;
+    }
+    try {
+      const parts = folderPath.split("/").filter((p) => p);
+      if (parts.length === 0) {
+        return parentFolderId;
+      }
+      let currentParentId = parentFolderId;
+      const accessToken = await this.authService.getValidAccessToken();
+      for (const folderName of parts) {
+        const searchUrl = `https://www.googleapis.com/drive/v3/files?q=name='${folderName}' and mimeType='application/vnd.google-apps.folder' and '${currentParentId}' in parents and trashed=false&fields=files(id,name)`;
+        const response = await import_obsidian2.requestUrl({
+          url: searchUrl,
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${accessToken}`
+          }
+        });
+        const files = response.json.files || [];
+        let folderId = null;
+        if (files.length > 0) {
+          folderId = files[0].id;
+          console.log(`    \uD83D\uDCC1 Found existing folder: ${folderName} (ID: ${folderId})`);
+        } else {
+          folderId = await this.createFolder(folderName, currentParentId);
+          if (!folderId) {
+            console.error(`    ❌ Failed to create folder: ${folderName}`);
+            return null;
+          }
+        }
+        currentParentId = folderId;
+      }
+      return currentParentId;
+    } catch (error) {
+      console.error("Error ensuring folder path:", error);
+      return null;
+    }
+  }
+  async uploadFile(filePath, fileData, mimeType, vaultId) {
+    console.log("  \uD83D\uDD35 GoogleDriveService.uploadFile() called");
+    console.log("    File path:", filePath);
+    console.log("    MIME type:", mimeType);
+    console.log("    Vault ID:", vaultId);
+    console.log("    Data size:", fileData.byteLength, "bytes");
+    try {
+      const accessToken = await this.authService.getValidAccessToken();
+      const vaultFolderId = await this.getOrCreateVaultFolder(vaultId);
+      if (!vaultFolderId) {
+        return {
+          success: false,
+          error: "Failed to get/create vault folder"
+        };
+      }
+      const pathParts = filePath.split("/");
+      const fileName = pathParts.pop() || filePath;
+      const folderPath = pathParts.join("/");
+      let targetFolderId = vaultFolderId;
+      if (folderPath) {
+        console.log("    \uD83D\uDCC1 Ensuring folder path exists:", folderPath);
+        targetFolderId = await this.ensureFolderPath(folderPath, vaultFolderId) || vaultFolderId;
+        console.log("    Target folder ID:", targetFolderId);
+      }
+      console.log("    \uD83D\uDD0D Checking for existing file...");
+      const searchUrl = `https://www.googleapis.com/drive/v3/files?q=name='${fileName}' and '${targetFolderId}' in parents and trashed=false&fields=files(id,name)`;
+      const searchResponse = await import_obsidian2.requestUrl({
+        url: searchUrl,
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${accessToken}`
+        }
+      });
+      const existingFiles = searchResponse.json.files || [];
+      console.log("    Found", existingFiles.length, "existing file(s)");
+      let fileId;
+      if (existingFiles.length > 0) {
+        fileId = existingFiles[0].id;
+        console.log("    ♻️  Updating existing file:", fileId);
+        if (existingFiles.length > 1) {
+          console.log("    \uD83D\uDDD1️  Deleting", existingFiles.length - 1, "duplicate(s)...");
+          for (let i = 1;i < existingFiles.length; i++) {
+            try {
+              await this.deleteFile(existingFiles[i].id);
+              console.log("    ✓ Deleted duplicate:", existingFiles[i].id);
+            } catch (err) {
+              console.warn("    ⚠️  Failed to delete duplicate:", err);
+            }
+          }
+        }
+        const boundary = "-------314159265358979323846";
+        const delimiter = `\r
+--${boundary}\r
+`;
+        const closeDelimiter = `\r
+--${boundary}--`;
+        const base64Data = arrayBufferToBase64(fileData);
+        const multipartRequestBody = delimiter + `Content-Type: application/json\r
+\r
+` + JSON.stringify({ mimeType }) + delimiter + "Content-Type: " + mimeType + `\r
+` + `Content-Transfer-Encoding: base64\r
+\r
+` + base64Data + closeDelimiter;
+        await import_obsidian2.requestUrl({
+          url: `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart`,
+          method: "PATCH",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": `multipart/related; boundary=${boundary}`
+          },
+          body: multipartRequestBody
+        });
+        console.log("    ✅ File UPDATED");
+      } else {
+        console.log("    ➕ Creating new file...");
+        const boundary = "-------314159265358979323846";
+        const delimiter = `\r
+--${boundary}\r
+`;
+        const closeDelimiter = `\r
+--${boundary}--`;
+        const base64Data = arrayBufferToBase64(fileData);
+        const metadata = {
+          name: fileName,
+          mimeType,
+          parents: [targetFolderId]
+        };
+        const multipartRequestBody = delimiter + `Content-Type: application/json\r
+\r
+` + JSON.stringify(metadata) + delimiter + "Content-Type: " + mimeType + `\r
+` + `Content-Transfer-Encoding: base64\r
+\r
+` + base64Data + closeDelimiter;
+        const createResponse = await import_obsidian2.requestUrl({
+          url: "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+            "Content-Type": `multipart/related; boundary=${boundary}`
+          },
+          body: multipartRequestBody
+        });
+        fileId = createResponse.json.id;
+        console.log("    ✅ File CREATED");
+      }
+      console.log("    File ID:", fileId);
+      return {
+        success: true,
+        fileId
+      };
+    } catch (error) {
+      console.error("    ❌ Error uploading file:", error);
+      return {
+        success: false,
+        error: `Upload failed: ${error}`
+      };
+    }
+  }
+  async downloadFile(fileId) {
+    try {
+      const accessToken = await this.authService.getValidAccessToken();
+      const response = await import_obsidian2.requestUrl({
+        url: `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`,
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${accessToken}`
+        }
+      });
+      return {
+        success: true,
+        data: response.arrayBuffer
+      };
+    } catch (error) {
+      console.error("Error downloading file:", error);
+      return {
+        success: false,
+        error: `Download failed: ${error}`
+      };
+    }
+  }
+  async listFiles(vaultId) {
+    try {
+      console.log("\uD83D\uDCCB Listing files from Google Drive...");
+      console.log("  Vault ID:", vaultId);
+      const accessToken = await this.authService.getValidAccessToken();
+      const vaultFolderId = await this.getOrCreateVaultFolder(vaultId);
+      if (!vaultFolderId) {
+        return {
+          success: false,
+          error: "Failed to get vault folder"
+        };
+      }
+      console.log("  \uD83D\uDCC2 Vault folder ID:", vaultFolderId);
+      const allFiles = [];
+      let pageToken = undefined;
+      let pageCount = 0;
+      do {
+        pageCount++;
+        let url = `https://www.googleapis.com/drive/v3/files?q='${vaultFolderId}' in parents and trashed=false and mimeType != 'application/vnd.google-apps.folder'&fields=files(id,name,mimeType,modifiedTime,size,webContentLink,webViewLink),nextPageToken&pageSize=1000&orderBy=modifiedTime desc`;
+        if (pageToken) {
+          url += `&pageToken=${pageToken}`;
+        }
+        console.log(`  \uD83D\uDCC4 Fetching page ${pageCount}...`);
+        const response = await import_obsidian2.requestUrl({
+          url,
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${accessToken}`
+          }
+        });
+        const files = response.json.files || [];
+        const pageFiles = files.map((file) => ({
+          id: file.id,
+          name: file.name,
+          mimeType: file.mimeType,
+          size: parseInt(file.size || "0"),
+          modifiedTime: file.modifiedTime,
+          webContentLink: file.webContentLink,
+          webViewLink: file.webViewLink
+        }));
+        allFiles.push(...pageFiles);
+        console.log(`  ✓ Page ${pageCount}: ${pageFiles.length} file(s)`);
+        pageToken = response.json.nextPageToken;
+      } while (pageToken);
+      console.log(`  ✅ Total: ${allFiles.length} file(s) across ${pageCount} page(s)`);
+      return {
+        success: true,
+        files: allFiles
+      };
+    } catch (error) {
+      console.error("Error listing files:", error);
+      return {
+        success: false,
+        error: `List files failed: ${error}`
+      };
+    }
+  }
+  async deleteFile(fileId) {
+    try {
+      const accessToken = await this.authService.getValidAccessToken();
+      await import_obsidian2.requestUrl({
+        url: `https://www.googleapis.com/drive/v3/files/${fileId}`,
+        method: "DELETE",
+        headers: {
+          Authorization: `Bearer ${accessToken}`
+        }
+      });
+      return {
+        success: true
+      };
+    } catch (error) {
+      console.error("Error deleting file:", error);
+      return {
+        success: false,
+        error: `Delete failed: ${error}`
+      };
+    }
+  }
+  async getFileMetadata(fileId) {
+    try {
+      const accessToken = await this.authService.getValidAccessToken();
+      const response = await import_obsidian2.requestUrl({
+        url: `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,mimeType,modifiedTime,size,webContentLink,webViewLink`,
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${accessToken}`
+        }
+      });
+      const file = {
+        id: response.json.id,
+        name: response.json.name,
+        mimeType: response.json.mimeType,
+        size: parseInt(response.json.size || "0"),
+        modifiedTime: response.json.modifiedTime,
+        webContentLink: response.json.webContentLink,
+        webViewLink: response.json.webViewLink
+      };
+      return {
+        success: true,
+        file
+      };
+    } catch (error) {
+      console.error("Error getting file metadata:", error);
+      return {
+        success: false,
+        error: `Get metadata failed: ${error}`
+      };
+    }
+  }
+}
+function arrayBufferToBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  for (let i = 0;i < bytes.byteLength; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return btoa(binary);
+}
+
 // src/services/syncService.ts
 class SyncService {
-  serverUrl;
   vaultId;
   vault;
   syncStateManager;
   vaultScanner;
-  authService;
-  constructor(serverUrl, vaultId, vault, syncStateManager, authService) {
-    this.serverUrl = serverUrl;
+  driveService;
+  constructor(vaultId, vault, authService, syncStateManager) {
     this.vaultId = vaultId;
     this.vault = vault;
     this.syncStateManager = syncStateManager;
     this.vaultScanner = new VaultScanner(vault);
-    this.authService = authService;
-  }
-  async getAuthHeaders() {
-    const headers = {
-      "Content-Type": "application/json"
-    };
-    if (this.authService?.isAuthenticated()) {
-      try {
-        const token = await this.authService.getValidAccessToken();
-        headers["Authorization"] = `Bearer ${token}`;
-      } catch (error) {
-        console.error("Failed to get access token:", error);
-      }
-    }
-    return headers;
+    this.driveService = new GoogleDriveService(authService);
   }
   async syncVault() {
     try {
       console.log(`
 \uD83D\uDD04 Starting delta sync for vault: ${this.vaultId}`);
       if (!this.syncStateManager) {
-        console.warn("⚠️  No sync state manager - falling back to basic sync");
-        return await this.syncVaultLegacy();
+        console.warn("⚠️  No sync state manager - cannot sync without it");
+        return {
+          success: false,
+          message: "No sync state manager available"
+        };
       }
       const localState = this.syncStateManager.getState();
       console.log(`\uD83D\uDCCB Local index: ${Object.keys(localState.files).length} file(s)`);
@@ -364,28 +748,10 @@ class SyncService {
       if (newFilesFound > 0) {
         console.log(`✅ Added ${newFilesFound} new file(s) to sync index`);
       }
-      console.log("\uD83D\uDCE1 Requesting delta from server...");
-      const authHeaders = await this.getAuthHeaders();
-      const deltaResponse = await fetch(`${this.serverUrl}/sync/delta`, {
-        method: "POST",
-        headers: authHeaders,
-        body: JSON.stringify({
-          vaultId: this.vaultId,
-          localIndex: {
-            files: Object.fromEntries(validLocalFiles)
-          }
-        })
-      });
-      if (!deltaResponse.ok) {
-        throw new Error(`Delta request failed: ${deltaResponse.statusText}`);
-      }
-      const deltaResult = await deltaResponse.json();
-      if (!deltaResult.success || !deltaResult.delta) {
-        throw new Error(`Delta calculation failed: ${deltaResult.message}`);
-      }
-      const delta = deltaResult.delta;
+      console.log("\uD83D\uDD0D Calculating delta...");
+      const delta = await this.calculateDelta(validLocalFiles);
       console.log(`
-\uD83D\uDCCA Delta received from server:`);
+\uD83D\uDCCA Delta calculated:`);
       console.log(`  To Download: ${delta.toDownload.length}`);
       console.log(`  To Upload: ${delta.toUpload.length}`);
       console.log(`  Conflicts: ${delta.conflicts.length}`);
@@ -397,7 +763,7 @@ class SyncService {
         for (const fileInfo of delta.toUpload) {
           try {
             const file = this.vault.getAbstractFileByPath(fileInfo.filePath);
-            if (file instanceof import_obsidian2.TFile) {
+            if (file instanceof import_obsidian3.TFile) {
               await this.uploadSingleFile(file);
               uploadedCount++;
               console.log(`  ✅ Uploaded: ${fileInfo.filePath} (${fileInfo.reason})`);
@@ -426,15 +792,11 @@ class SyncService {
 ⚠️  ${delta.conflicts.length} conflict(s) detected`);
         for (const conflict of delta.conflicts) {
           console.log(`  ⚠️  ${conflict.filePath}`);
-          if (this.syncStateManager) {
-            this.syncStateManager.markConflict(conflict.filePath);
-          }
+          this.syncStateManager.markConflict(conflict.filePath);
         }
       }
-      if (this.syncStateManager) {
-        this.syncStateManager.markFullSyncCompleted();
-        this.syncStateManager.markRemoteCheckCompleted();
-      }
+      this.syncStateManager.markFullSyncCompleted();
+      this.syncStateManager.markRemoteCheckCompleted();
       console.log(`
 ✅ Delta sync completed`);
       return {
@@ -453,89 +815,119 @@ class SyncService {
       };
     }
   }
-  async syncVaultLegacy() {
-    try {
-      console.log("Using legacy sync method");
-      const filesToSync = await this.getFilesToSync();
-      const uploadResults = filesToSync.length > 0 ? await this.uploadFiles(filesToSync) : [];
-      const remoteChanges = await this.checkRemoteChanges();
-      const downloadResults = await this.downloadFiles(remoteChanges);
-      const conflicts = await this.getConflicts();
-      return {
-        success: true,
-        message: "Sync completed successfully (legacy mode)",
-        uploadedFiles: uploadResults.length,
-        downloadedFiles: downloadResults.length,
-        conflicts: conflicts.length,
-        skippedFiles: 0
-      };
-    } catch (error) {
-      console.error("Legacy sync failed:", error);
-      return {
-        success: false,
-        message: `Sync failed: ${error}`
-      };
+  async calculateDelta(localFilesMap) {
+    console.log("  \uD83D\uDCE5 Fetching remote files from Google Drive...");
+    const listResult = await this.driveService.listFiles(this.vaultId);
+    if (!listResult.success) {
+      throw new Error(`Failed to list files: ${listResult.error}`);
     }
-  }
-  async getFilesToSync() {
-    const files = [];
-    const relevantExtensions = [".md", ".txt", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".svg"];
-    try {
-      console.log("\uD83D\uDCC2 Scanning vault using efficient vault.adapter methods...");
-      const startTime = Date.now();
-      const fileMetadata = await this.vaultScanner.scanVault({
-        includeExtensions: relevantExtensions,
-        recursive: true
-      });
-      const scanTime = Date.now() - startTime;
-      console.log(`✅ Scanned ${fileMetadata.length} file(s) in ${scanTime}ms`);
-      const fileItems = fileMetadata.filter((item) => !item.isFolder);
-      for (const fileMeta of fileItems) {
-        try {
-          if (this.syncStateManager) {
-            const fileState = this.syncStateManager.getFileState(fileMeta.path);
-            if (fileState && fileState.lastSyncedTime === fileMeta.mtime && fileState.lastSyncedSize === fileMeta.size) {
-              console.log(`⏭️  Skipping unchanged file (quick check): ${fileMeta.path}`);
-              continue;
-            }
-          }
-          const file = this.vault.getAbstractFileByPath(fileMeta.path);
-          if (!(file instanceof import_obsidian2.TFile)) {
-            continue;
-          }
-          const isBinary = this.isBinaryFile(file.extension);
-          let content;
-          let hash;
-          if (isBinary) {
-            content = await this.vault.readBinary(file);
-            hash = await this.computeHash(content);
+    const remoteFiles = listResult.files || [];
+    console.log("  ✅ Remote files:", remoteFiles.length);
+    const remoteFilesMap = new Map;
+    for (const file of remoteFiles) {
+      remoteFilesMap.set(file.name, file);
+    }
+    const toDownload = [];
+    const toUpload = [];
+    const conflicts = [];
+    let inSync = 0;
+    console.log(`
+  \uD83D\uDD0D Analyzing differences...`);
+    for (const remoteFile of remoteFiles) {
+      const filePath = remoteFile.name;
+      const localFile = localFilesMap.get(filePath);
+      const remoteMtime = new Date(remoteFile.modifiedTime).getTime();
+      if (!localFile) {
+        console.log(`  \uD83D\uDCE5 Missing local: ${filePath}`);
+        toDownload.push({
+          id: remoteFile.id,
+          filePath,
+          reason: "missing_local",
+          remoteMtime,
+          remoteSize: remoteFile.size
+        });
+      } else {
+        const localMtime = localFile.lastSyncedTime;
+        if (localFile.remoteFileId === remoteFile.id) {
+          if (remoteMtime > localMtime) {
+            console.log(`  \uD83D\uDCE5 Remote newer: ${filePath}`);
+            toDownload.push({
+              id: remoteFile.id,
+              filePath,
+              reason: "remote_newer",
+              remoteMtime,
+              remoteSize: remoteFile.size
+            });
+          } else if (localMtime > remoteMtime) {
+            console.log(`  \uD83D\uDCE4 Local newer: ${filePath}`);
+            toUpload.push({
+              filePath,
+              reason: "local_newer",
+              localMtime,
+              localSize: localFile.lastSyncedSize
+            });
           } else {
-            content = await this.vault.read(file);
-            hash = await this.computeHash(content);
+            inSync++;
           }
-          if (this.syncStateManager) {
-            const needsSync = this.syncStateManager.needsSync(fileMeta.path, hash, fileMeta.mtime, fileMeta.size);
-            if (!needsSync) {
-              console.log(`⏭️  Skipping unchanged file (hash check): ${fileMeta.path}`);
-              continue;
-            }
+        } else {
+          if (remoteMtime > localMtime) {
+            console.log(`  \uD83D\uDCE5 Remote newer (different ID): ${filePath}`);
+            toDownload.push({
+              id: remoteFile.id,
+              filePath,
+              reason: "remote_newer",
+              remoteMtime,
+              remoteSize: remoteFile.size
+            });
+          } else {
+            inSync++;
           }
-          files.push({
-            path: fileMeta.path,
-            content,
-            size: fileMeta.size,
-            hash,
-            isBinary,
-            mtime: fileMeta.mtime
-          });
-        } catch (error) {
-          console.warn(`Failed to read file ${fileMeta.path}:`, error);
         }
       }
-    } catch (error) {
-      console.error("Error scanning vault:", error);
     }
-    return files;
+    for (const [filePath, localFile] of localFilesMap.entries()) {
+      const remoteFile = remoteFilesMap.get(filePath);
+      if (!remoteFile) {
+        if (localFile.lastSyncedTime === 0 && localFile.lastSyncedHash === "") {
+          console.log(`  ⏭️  Skipping remote-only tracking entry: ${filePath}`);
+          continue;
+        }
+        if (!localFile.remoteFileId) {
+          console.log(`  \uD83D\uDCE4 New local file: ${filePath}`);
+          toUpload.push({
+            filePath,
+            reason: "never_synced",
+            localMtime: localFile.lastSyncedTime,
+            localSize: localFile.lastSyncedSize
+          });
+        } else {
+          console.log(`  \uD83D\uDCE4 Missing remote (was synced): ${filePath}`);
+          toUpload.push({
+            filePath,
+            reason: "missing_remote",
+            localMtime: localFile.lastSyncedTime,
+            localSize: localFile.lastSyncedSize
+          });
+        }
+      }
+    }
+    const delta = {
+      toDownload,
+      toUpload,
+      conflicts,
+      inSync,
+      totalRemote: remoteFiles.length,
+      totalLocal: localFilesMap.size
+    };
+    console.log(`
+  \uD83D\uDCCA Delta Summary:`);
+    console.log(`    To Download: ${toDownload.length}`);
+    console.log(`    To Upload: ${toUpload.length}`);
+    console.log(`    Conflicts: ${conflicts.length}`);
+    console.log(`    In Sync: ${inSync}`);
+    console.log(`    Total Remote: ${delta.totalRemote}`);
+    console.log(`    Total Local: ${delta.totalLocal}`);
+    return delta;
   }
   isBinaryFile(extension) {
     const binaryExtensions = ["pdf", "png", "jpg", "jpeg", "gif", "svg", "webp", "mp4", "mp3", "wav"];
@@ -548,18 +940,8 @@ class SyncService {
     const hashArray = Array.from(new Uint8Array(hashBuffer));
     return hashArray.map((b) => b.toString(16).padStart(2, "0")).join("");
   }
-  arrayBufferToBase64(buffer) {
-    const bytes = new Uint8Array(buffer);
-    const chunkSize = 32768;
-    let binary = "";
-    for (let i = 0;i < bytes.length; i += chunkSize) {
-      const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
-      binary += String.fromCharCode.apply(null, Array.from(chunk));
-    }
-    return btoa(binary);
-  }
   async ensureParentFoldersExist(filePath) {
-    const normalizedPath = import_obsidian2.normalizePath(filePath);
+    const normalizedPath = import_obsidian3.normalizePath(filePath);
     const parentPath = normalizedPath.substring(0, normalizedPath.lastIndexOf("/"));
     if (parentPath && !this.vault.getAbstractFileByPath(parentPath)) {
       const parts = parentPath.split("/");
@@ -573,324 +955,6 @@ class SyncService {
       }
     }
   }
-  async uploadFiles(files) {
-    const results = [];
-    for (const file of files) {
-      try {
-        let fileData;
-        if (file.isBinary) {
-          fileData = this.arrayBufferToBase64(file.content);
-        } else {
-          fileData = btoa(unescape(encodeURIComponent(file.content)));
-        }
-        const response = await fetch(`${this.serverUrl}/sync/upload`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            vaultId: this.vaultId,
-            filePath: file.path,
-            fileData,
-            lastModified: Date.now()
-          })
-        });
-        if (response.ok) {
-          const result = await response.json();
-          results.push(result);
-          console.log(`Uploaded: ${file.path}`);
-          if (this.syncStateManager && result.data?.fileId) {
-            const metadata = await this.vaultScanner.getFileMetadata(file.path);
-            this.syncStateManager.markSynced(file.path, file.hash, file.mtime, file.size, result.data.fileId, {
-              ctime: metadata?.ctime,
-              extension: metadata?.extension,
-              operation: "upload"
-            });
-          }
-        } else if (response.status === 401) {
-          throw new Error("Authentication required. Please authenticate with Google Drive in plugin settings.");
-        } else {
-          console.warn(`Failed to upload ${file.path}:`, response.statusText);
-          if (this.syncStateManager) {
-            this.syncStateManager.markSyncError(file.path, response.statusText, "upload");
-          }
-        }
-      } catch (error) {
-        console.error(`Error uploading ${file.path}:`, error);
-        if (this.syncStateManager) {
-          this.syncStateManager.markSyncError(file.path, String(error), "upload");
-        }
-      }
-    }
-    return results;
-  }
-  async checkRemoteChanges() {
-    try {
-      const authHeaders = await this.getAuthHeaders();
-      const response = await fetch(`${this.serverUrl}/sync/metadata/${this.vaultId}`, {
-        headers: authHeaders
-      });
-      if (response.ok) {
-        const metadata = await response.json();
-        return metadata.files || [];
-      } else {
-        console.warn("Failed to check remote changes:", response.statusText);
-        return [];
-      }
-    } catch (error) {
-      console.error("Error checking remote changes:", error);
-      return [];
-    }
-  }
-  async downloadFiles(remoteFiles) {
-    const results = [];
-    console.log(`
-\uD83D\uDD0D Checking ${remoteFiles.length} remote file(s) for download...`);
-    let localIndexFiles = new Set;
-    if (this.syncStateManager) {
-      const state = this.syncStateManager.getState();
-      localIndexFiles = new Set(state.files.keys());
-      console.log(`\uD83D\uDCCB Local index contains ${localIndexFiles.size} tracked file(s)`);
-    }
-    for (const remoteFile of remoteFiles) {
-      try {
-        const normalizedPath = import_obsidian2.normalizePath(remoteFile.filePath);
-        const existingFile = this.vault.getAbstractFileByPath(normalizedPath);
-        console.log(`
-\uD83D\uDCC4 Evaluating remote file: ${normalizedPath}`);
-        console.log(`  Remote ID: ${remoteFile.id}`);
-        console.log(`  Remote mtime: ${remoteFile.lastModified}`);
-        console.log(`  Exists in local vault: ${existingFile instanceof import_obsidian2.TFile}`);
-        console.log(`  Tracked in local index: ${localIndexFiles.has(normalizedPath)}`);
-        if (this.syncStateManager) {
-          this.syncStateManager.updateRemoteFileInfo(normalizedPath, remoteFile.id, remoteFile.lastModified, remoteFile.hash);
-        }
-        let downloadAction = "skip";
-        let isUpdate = false;
-        if (this.syncStateManager) {
-          let localMtime = 0;
-          let localHash = "";
-          const localExists = existingFile instanceof import_obsidian2.TFile;
-          if (localExists) {
-            localMtime = existingFile.stat.mtime;
-            const content = this.isBinaryFile(existingFile.extension) ? await this.vault.readBinary(existingFile) : await this.vault.read(existingFile);
-            localHash = await this.computeHash(content);
-            console.log(`  Local mtime: ${localMtime}`);
-            console.log(`  Local hash: ${localHash.substring(0, 16)}...`);
-          }
-          downloadAction = this.syncStateManager.shouldDownloadRemoteFile(normalizedPath, remoteFile.id, remoteFile.lastModified, localExists, localMtime, localHash);
-          console.log(`  Download action: ${downloadAction}`);
-          isUpdate = localExists;
-        } else {
-          if (!existingFile) {
-            downloadAction = "download";
-            isUpdate = false;
-          }
-        }
-        const shouldDownload = downloadAction === "download";
-        if (downloadAction === "conflict") {
-          console.warn(`⚠️  CONFLICT: ${normalizedPath}`);
-          if (this.syncStateManager) {
-            this.syncStateManager.markConflict(normalizedPath);
-          }
-          continue;
-        }
-        if (shouldDownload) {
-          console.log(`⬇️  Starting download: ${normalizedPath}`);
-          console.log(`  From remote ID: ${remoteFile.id}`);
-          const authHeaders = await this.getAuthHeaders();
-          const response = await fetch(`${this.serverUrl}/sync/download/${remoteFile.id}`, {
-            headers: authHeaders
-          });
-          if (response.status === 401) {
-            throw new Error("Authentication required. Please authenticate with Google Drive in plugin settings.");
-          }
-          if (response.ok) {
-            const result = await response.json();
-            if (result.success && result.data && result.data.fileData) {
-              const base64Data = result.data.fileData;
-              const extension = normalizedPath.substring(normalizedPath.lastIndexOf(".")).slice(1);
-              const isBinary = this.isBinaryFile(extension);
-              if (isUpdate) {
-                if (isBinary) {
-                  const binaryString = atob(base64Data);
-                  const bytes = new Uint8Array(binaryString.length);
-                  for (let i = 0;i < binaryString.length; i++) {
-                    bytes[i] = binaryString.charCodeAt(i);
-                  }
-                  await this.vault.modifyBinary(existingFile, bytes.buffer);
-                } else {
-                  const textContent = decodeURIComponent(escape(atob(base64Data)));
-                  await this.vault.modify(existingFile, textContent);
-                }
-                console.log(`Updated: ${remoteFile.filePath}`);
-              } else {
-                await this.ensureParentFoldersExist(normalizedPath);
-                if (isBinary) {
-                  const binaryString = atob(base64Data);
-                  const bytes = new Uint8Array(binaryString.length);
-                  for (let i = 0;i < binaryString.length; i++) {
-                    bytes[i] = binaryString.charCodeAt(i);
-                  }
-                  await this.vault.createBinary(normalizedPath, bytes.buffer);
-                } else {
-                  const textContent = decodeURIComponent(escape(atob(base64Data)));
-                  await this.vault.create(normalizedPath, textContent);
-                }
-                console.log(`Downloaded: ${remoteFile.filePath}`);
-              }
-              if (this.syncStateManager) {
-                let hash;
-                if (isBinary) {
-                  const binaryString = atob(base64Data);
-                  const bytes = new Uint8Array(binaryString.length);
-                  for (let i = 0;i < binaryString.length; i++) {
-                    bytes[i] = binaryString.charCodeAt(i);
-                  }
-                  hash = await this.computeHash(bytes.buffer);
-                } else {
-                  const textContent = decodeURIComponent(escape(atob(base64Data)));
-                  hash = await this.computeHash(textContent);
-                }
-                this.syncStateManager.markSynced(normalizedPath, hash, remoteFile.lastModified, remoteFile.size, remoteFile.id);
-              }
-              results.push(result);
-            }
-          } else {
-            console.warn(`Failed to download ${remoteFile.filePath}:`, response.statusText);
-          }
-        }
-      } catch (error) {
-        console.error(`Error downloading ${remoteFile.filePath}:`, error);
-      }
-    }
-    return results;
-  }
-  async getConflicts() {
-    try {
-      const authHeaders = await this.getAuthHeaders();
-      const response = await fetch(`${this.serverUrl}/sync/conflicts`, {
-        headers: authHeaders
-      });
-      if (response.ok) {
-        const result = await response.json();
-        return result.data?.conflicts || [];
-      } else {
-        console.warn("Failed to check conflicts:", response.statusText);
-        return [];
-      }
-    } catch (error) {
-      console.error("Error checking conflicts:", error);
-      return [];
-    }
-  }
-  async resolveConflict(conflictId, strategy, resolvedContent) {
-    try {
-      const response = await fetch(`${this.serverUrl}/sync/resolve-conflict`, {
-        method: "POST",
-        headers: await this.getAuthHeaders(),
-        body: JSON.stringify({
-          conflictId,
-          strategy,
-          resolvedContent
-        })
-      });
-      if (response.ok) {
-        const result = await response.json();
-        return result.success || false;
-      } else {
-        console.warn("Failed to resolve conflict:", response.statusText);
-        return false;
-      }
-    } catch (error) {
-      console.error("Error resolving conflict:", error);
-      return false;
-    }
-  }
-  async autoResolveConflict(conflictId) {
-    try {
-      const response = await fetch(`${this.serverUrl}/sync/auto-resolve`, {
-        method: "POST",
-        headers: await this.getAuthHeaders(),
-        body: JSON.stringify({
-          conflictId
-        })
-      });
-      if (response.ok) {
-        return await response.json();
-      } else {
-        console.warn("Failed to auto-resolve conflict:", response.statusText);
-        return { success: false };
-      }
-    } catch (error) {
-      console.error("Error auto-resolving conflict:", error);
-      return { success: false };
-    }
-  }
-  async watchFiles(filePaths) {
-    try {
-      for (const filePath of filePaths) {
-        const response = await fetch(`${this.serverUrl}/sync/watch`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            filePath
-          })
-        });
-        if (!response.ok) {
-          console.warn(`Failed to watch file ${filePath}:`, response.statusText);
-        }
-      }
-      return true;
-    } catch (error) {
-      console.error("Error setting up file watching:", error);
-      return false;
-    }
-  }
-  async getFileChanges() {
-    try {
-      const authHeaders = await this.getAuthHeaders();
-      const response = await fetch(`${this.serverUrl}/sync/changes`, {
-        headers: authHeaders
-      });
-      if (response.ok) {
-        return await response.json();
-      } else {
-        console.warn("Failed to get file changes:", response.statusText);
-        return { success: false };
-      }
-    } catch (error) {
-      console.error("Error getting file changes:", error);
-      return { success: false };
-    }
-  }
-  async testConnection() {
-    try {
-      const authHeaders = await this.getAuthHeaders();
-      const response = await fetch(`${this.serverUrl}/health`, {
-        headers: authHeaders
-      });
-      if (response.ok) {
-        const health = await response.json();
-        return {
-          connected: true,
-          message: `Server is healthy. Version: ${health.version}`
-        };
-      } else {
-        return {
-          connected: false,
-          message: `Server responded with status: ${response.status}`
-        };
-      }
-    } catch (error) {
-      return {
-        connected: false,
-        message: `Connection failed: ${error}`
-      };
-    }
-  }
   async syncOnChange(changedFiles) {
     console.log(`Sync triggered by changes to: ${changedFiles.join(", ")}`);
     await this.syncVault();
@@ -899,7 +963,7 @@ class SyncService {
     console.log(`\uD83C\uDD95 Handling new file creation: ${filePath}`);
     try {
       const file = this.vault.getAbstractFileByPath(filePath);
-      if (!(file instanceof import_obsidian2.TFile)) {
+      if (!(file instanceof import_obsidian3.TFile)) {
         console.log(`  ⚠️ Not a valid file: ${filePath}`);
         return;
       }
@@ -930,7 +994,7 @@ class SyncService {
     console.log(`\uD83D\uDCDD Handling file modification: ${filePath}`);
     try {
       const file = this.vault.getAbstractFileByPath(filePath);
-      if (!(file instanceof import_obsidian2.TFile)) {
+      if (!(file instanceof import_obsidian3.TFile)) {
         console.log(`  ⚠️ Not a valid file: ${filePath}`);
         return;
       }
@@ -1051,7 +1115,7 @@ class SyncService {
           newFilesFound++;
           try {
             const file = this.vault.getAbstractFileByPath(vaultFile.path);
-            if (file instanceof import_obsidian2.TFile) {
+            if (file instanceof import_obsidian3.TFile) {
               await this.uploadSingleFile(file);
               console.log(`    ✅ Uploaded untracked file: ${vaultFile.path}`);
             }
@@ -1092,100 +1156,58 @@ class SyncService {
     const isBinary = this.isBinaryFile(file.extension);
     const content = isBinary ? await this.vault.readBinary(file) : await this.vault.read(file);
     const hash = await this.computeHash(content);
+    const mimeType = this.getMimeType(file.extension);
     let fileData;
     if (isBinary) {
-      fileData = this.arrayBufferToBase64(content);
+      fileData = content;
     } else {
-      fileData = btoa(unescape(encodeURIComponent(content)));
+      const encoder = new TextEncoder;
+      fileData = encoder.encode(content).buffer;
     }
-    const response = await fetch(`${this.serverUrl}/sync/upload`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        vaultId: this.vaultId,
-        filePath: file.path,
-        fileData,
-        lastModified: file.stat.mtime
-      })
-    });
-    if (response.ok) {
-      const result = await response.json();
-      if (result.success && this.syncStateManager) {
-        const metadata = await this.vaultScanner.getFileMetadata(file.path);
-        this.syncStateManager.markSynced(file.path, hash, file.stat.mtime, file.stat.size, result.data?.fileId, {
-          ctime: metadata?.ctime,
-          extension: metadata?.extension,
-          operation: "upload"
-        });
-      }
+    const result = await this.driveService.uploadFile(file.path, fileData, mimeType, this.vaultId);
+    if (result.success && this.syncStateManager) {
+      const metadata = await this.vaultScanner.getFileMetadata(file.path);
+      this.syncStateManager.markSynced(file.path, hash, file.stat.mtime, file.stat.size, result.fileId, {
+        ctime: metadata?.ctime,
+        extension: metadata?.extension,
+        operation: "upload"
+      });
     } else {
       if (this.syncStateManager) {
-        this.syncStateManager.markSyncError(file.path, response.statusText, "upload");
+        this.syncStateManager.markSyncError(file.path, result.error || "Unknown error", "upload");
       }
-      throw new Error(`Upload failed: ${response.statusText}`);
+      throw new Error(`Upload failed: ${result.error}`);
     }
   }
   async downloadSingleFile(fileInfo) {
-    const authHeaders = await this.getAuthHeaders();
-    const response = await fetch(`${this.serverUrl}/sync/download/${fileInfo.id}`, {
-      headers: authHeaders
-    });
-    if (response.status === 401) {
-      throw new Error("Authentication required");
+    const result = await this.driveService.downloadFile(fileInfo.id);
+    if (!result.success || !result.data) {
+      throw new Error(`Download failed: ${result.error}`);
     }
-    if (!response.ok) {
-      throw new Error(`Download failed: ${response.statusText}`);
-    }
-    const result = await response.json();
-    if (!result.success || !result.data || !result.data.fileData) {
-      throw new Error("Invalid download response");
-    }
-    const normalizedPath = import_obsidian2.normalizePath(fileInfo.filePath);
+    const normalizedPath = import_obsidian3.normalizePath(fileInfo.filePath);
     const existingFile = this.vault.getAbstractFileByPath(normalizedPath);
     const extension = normalizedPath.substring(normalizedPath.lastIndexOf(".")).slice(1);
     const isBinary = this.isBinaryFile(extension);
-    const base64Data = result.data.fileData;
-    if (existingFile instanceof import_obsidian2.TFile) {
+    const fileData = result.data;
+    if (existingFile instanceof import_obsidian3.TFile) {
       if (isBinary) {
-        const binaryString = atob(base64Data);
-        const bytes = new Uint8Array(binaryString.length);
-        for (let i = 0;i < binaryString.length; i++) {
-          bytes[i] = binaryString.charCodeAt(i);
-        }
-        await this.vault.modifyBinary(existingFile, bytes.buffer);
+        await this.vault.modifyBinary(existingFile, fileData);
       } else {
-        const textContent = decodeURIComponent(escape(atob(base64Data)));
+        const textContent = new TextDecoder().decode(fileData);
         await this.vault.modify(existingFile, textContent);
       }
     } else {
-      const parentPath = normalizedPath.substring(0, normalizedPath.lastIndexOf("/"));
-      if (parentPath && !this.vault.getAbstractFileByPath(parentPath)) {
-        const parts = parentPath.split("/");
-        let currentPath = "";
-        for (const part of parts) {
-          currentPath = currentPath ? `${currentPath}/${part}` : part;
-          if (!this.vault.getAbstractFileByPath(currentPath)) {
-            await this.vault.createFolder(currentPath);
-          }
-        }
-      }
+      await this.ensureParentFoldersExist(normalizedPath);
       if (isBinary) {
-        const binaryString = atob(base64Data);
-        const bytes = new Uint8Array(binaryString.length);
-        for (let i = 0;i < binaryString.length; i++) {
-          bytes[i] = binaryString.charCodeAt(i);
-        }
-        await this.vault.createBinary(normalizedPath, bytes.buffer);
+        await this.vault.createBinary(normalizedPath, fileData);
       } else {
-        const textContent = decodeURIComponent(escape(atob(base64Data)));
+        const textContent = new TextDecoder().decode(fileData);
         await this.vault.create(normalizedPath, textContent);
       }
     }
     if (this.syncStateManager) {
       const file = this.vault.getAbstractFileByPath(normalizedPath);
-      if (file instanceof import_obsidian2.TFile) {
+      if (file instanceof import_obsidian3.TFile) {
         const content = isBinary ? await this.vault.readBinary(file) : await this.vault.read(file);
         const hash = await this.computeHash(content);
         const metadata = await this.vaultScanner.getFileMetadata(normalizedPath);
@@ -1197,10 +1219,27 @@ class SyncService {
       }
     }
   }
+  getMimeType(extension) {
+    const mimeTypes = {
+      md: "text/markdown",
+      txt: "text/plain",
+      pdf: "application/pdf",
+      png: "image/png",
+      jpg: "image/jpeg",
+      jpeg: "image/jpeg",
+      gif: "image/gif",
+      svg: "image/svg+xml",
+      mp4: "video/mp4",
+      webm: "video/webm",
+      mp3: "audio/mpeg",
+      wav: "audio/wav"
+    };
+    return mimeTypes[extension.toLowerCase()] || "application/octet-stream";
+  }
 }
 
 // src/services/conflictUI.ts
-var import_obsidian3 = require("obsidian");
+var import_obsidian4 = require("obsidian");
 
 class ConflictUIService {
   app;
@@ -1322,7 +1361,7 @@ Choose an option (1-4):`);
   }
 }
 
-class ConflictResolutionModal extends import_obsidian3.Modal {
+class ConflictResolutionModal extends import_obsidian4.Modal {
   conflict;
   onChoose;
   constructor(app, conflict, onChoose) {
@@ -1350,15 +1389,15 @@ class ConflictResolutionModal extends import_obsidian3.Modal {
       text: `Modified: ${new Date(this.conflict.remoteVersion.lastModified).toLocaleString()}`
     });
     const buttonContainer = contentEl.createDiv({ cls: "conflict-buttons" });
-    new import_obsidian3.Setting(buttonContainer).addButton((button) => button.setButtonText("Keep Local").onClick(() => {
+    new import_obsidian4.Setting(buttonContainer).addButton((button) => button.setButtonText("Keep Local").onClick(() => {
       this.onChoose("local");
       this.close();
     }));
-    new import_obsidian3.Setting(buttonContainer).addButton((button) => button.setButtonText("Keep Remote").onClick(() => {
+    new import_obsidian4.Setting(buttonContainer).addButton((button) => button.setButtonText("Keep Remote").onClick(() => {
       this.onChoose("remote");
       this.close();
     }));
-    new import_obsidian3.Setting(buttonContainer).addButton((button) => button.setButtonText("Keep Both (Merge)").setWarning().onClick(() => {
+    new import_obsidian4.Setting(buttonContainer).addButton((button) => button.setButtonText("Keep Both (Merge)").setWarning().onClick(() => {
       const merged = this.mergeContent(this.conflict.localVersion.content, this.conflict.remoteVersion.content);
       this.onChoose("manual", merged);
       this.close();
@@ -1886,7 +1925,7 @@ class SyncIndexFile {
 }
 
 // src/services/googleDriveAuth.ts
-var import_obsidian4 = require("obsidian");
+var import_obsidian5 = require("obsidian");
 
 class GoogleDriveAuthService {
   clientId;
@@ -1914,7 +1953,7 @@ class GoogleDriveAuthService {
   }
   async exchangeCodeForTokens(code) {
     try {
-      const response = await import_obsidian4.requestUrl({
+      const response = await import_obsidian5.requestUrl({
         url: "https://oauth2.googleapis.com/token",
         method: "POST",
         headers: {
@@ -1965,7 +2004,7 @@ class GoogleDriveAuthService {
       throw new Error("No refresh token available");
     }
     try {
-      const response = await import_obsidian4.requestUrl({
+      const response = await import_obsidian5.requestUrl({
         url: "https://oauth2.googleapis.com/token",
         method: "POST",
         headers: {
@@ -2003,7 +2042,7 @@ class GoogleDriveAuthService {
       return;
     }
     try {
-      await import_obsidian4.requestUrl({
+      await import_obsidian5.requestUrl({
         url: `https://oauth2.googleapis.com/revoke?token=${this.tokens.access_token}`,
         method: "POST"
       });
@@ -2020,7 +2059,6 @@ var DEFAULT_SETTINGS = {
   googleClientId: "",
   googleClientSecret: "",
   googleTokens: null,
-  serverUrl: "http://localhost:3000",
   vaultId: "",
   syncInterval: 30,
   autoSync: true,
@@ -2028,7 +2066,7 @@ var DEFAULT_SETTINGS = {
   syncState: null
 };
 
-class ObsidianSyncPlugin extends import_obsidian5.Plugin {
+class ObsidianSyncPlugin extends import_obsidian6.Plugin {
   settings = DEFAULT_SETTINGS;
   googleAuthService = null;
   syncTimer = null;
@@ -2059,9 +2097,13 @@ class ObsidianSyncPlugin extends import_obsidian5.Plugin {
     });
     this.addCommand({
       id: "test-connection",
-      name: "Test Server Connection",
-      callback: () => {
-        this.testConnection();
+      name: "Test Google Drive Connection",
+      callback: async () => {
+        if (this.googleAuthService?.isAuthenticated()) {
+          new import_obsidian6.Notice("✓ Google Drive is authenticated and ready");
+        } else {
+          new import_obsidian6.Notice("✗ Google Drive not authenticated. Please authenticate in plugin settings.");
+        }
       }
     });
     this.addCommand({
@@ -2069,20 +2111,20 @@ class ObsidianSyncPlugin extends import_obsidian5.Plugin {
       name: "Reconcile Sync Index",
       callback: async () => {
         if (this.syncService) {
-          new import_obsidian5.Notice("Reconciling sync index...");
+          new import_obsidian6.Notice("Reconciling sync index...");
           try {
             const newFiles = await this.syncService.reconcileIndex();
             if (newFiles > 0) {
-              new import_obsidian5.Notice(`Found and uploaded ${newFiles} untracked file(s)`);
+              new import_obsidian6.Notice(`Found and uploaded ${newFiles} untracked file(s)`);
               await this.saveSyncState();
             } else {
-              new import_obsidian5.Notice("Index is already in sync");
+              new import_obsidian6.Notice("Index is already in sync");
             }
           } catch (error) {
-            new import_obsidian5.Notice("Failed to reconcile index: " + error.message);
+            new import_obsidian6.Notice("Failed to reconcile index: " + error.message);
           }
         } else {
-          new import_obsidian5.Notice("Sync service not initialized");
+          new import_obsidian6.Notice("Sync service not initialized");
         }
       }
     });
@@ -2100,15 +2142,19 @@ class ObsidianSyncPlugin extends import_obsidian5.Plugin {
   async initializeServices() {
     try {
       console.log("Initializing services...");
-      console.log("  Server URL:", this.settings.serverUrl);
       console.log("  Vault ID:", this.settings.vaultId || "(not set)");
+      if (!this.googleAuthService?.isAuthenticated()) {
+        console.warn("⚠️  Google Drive not authenticated - sync will not work");
+        new import_obsidian6.Notice("Please authenticate with Google Drive in plugin settings");
+        return;
+      }
       this.syncIndexFile = new SyncIndexFile(this.app.vault);
       await this.loadSyncState();
-      this.syncService = new SyncService(this.settings.serverUrl, this.settings.vaultId, this.app.vault, this.syncStateManager, this.googleAuthService);
+      this.syncService = new SyncService(this.settings.vaultId, this.app.vault, this.googleAuthService, this.syncStateManager);
       this.conflictUI = new ConflictUIService(this.app, this.syncService);
       this.conflictUI.onResolution((result) => {
         console.log(`Conflict resolved: ${result.conflictId} -> ${result.resolution}`);
-        new import_obsidian5.Notice(`Conflict resolved: ${result.resolution}`);
+        new import_obsidian6.Notice(`Conflict resolved: ${result.resolution}`);
       });
       this.vaultWatcher = new VaultWatcherService(this.app.vault);
       this.vaultWatcher.onChange(async (change) => {
@@ -2171,10 +2217,10 @@ class ObsidianSyncPlugin extends import_obsidian5.Plugin {
       this.startRemoteCheck();
       this.startIndexReconciliation();
       this.performInitialSync();
-      new import_obsidian5.Notice("Obsidian Sync initialized successfully");
+      new import_obsidian6.Notice("Obsidian Sync initialized successfully");
     } catch (error) {
       console.error("Failed to initialize Obsidian Sync:", error);
-      new import_obsidian5.Notice("Failed to initialize Obsidian Sync: " + error.message);
+      new import_obsidian6.Notice("Failed to initialize Obsidian Sync: " + error.message);
     }
   }
   async loadSettings() {
@@ -2227,22 +2273,22 @@ class ObsidianSyncPlugin extends import_obsidian5.Plugin {
       }
     } catch (error) {
       console.error("Failed to initialize Google Drive:", error);
-      new import_obsidian5.Notice("Failed to initialize Google Drive: " + error.message);
+      new import_obsidian6.Notice("Failed to initialize Google Drive: " + error.message);
     }
   }
   async startGoogleDriveOAuth() {
     if (!this.googleAuthService) {
-      new import_obsidian5.Notice("Please configure Google OAuth credentials first");
+      new import_obsidian6.Notice("Please configure Google OAuth credentials first");
       return;
     }
     try {
       const authUrl = this.googleAuthService.getAuthUrl();
       window.open(authUrl, "_blank");
-      new import_obsidian5.Notice("Opening Google authentication in browser...");
+      new import_obsidian6.Notice("Opening Google authentication in browser...");
       await this.startOAuthCallbackServer();
     } catch (error) {
       console.error("OAuth error:", error);
-      new import_obsidian5.Notice("Failed to start OAuth: " + error.message);
+      new import_obsidian6.Notice("Failed to start OAuth: " + error.message);
     }
   }
   async startOAuthCallbackServer() {
@@ -2251,15 +2297,15 @@ class ObsidianSyncPlugin extends import_obsidian5.Plugin {
         if (!this.googleAuthService) {
           throw new Error("Google Auth service not initialized");
         }
-        new import_obsidian5.Notice("Exchanging authorization code...");
+        new import_obsidian6.Notice("Exchanging authorization code...");
         const tokens = await this.googleAuthService.exchangeCodeForTokens(code);
         this.settings.googleTokens = tokens;
         await this.saveData(this.settings);
-        new import_obsidian5.Notice("✅ Successfully authenticated with Google Drive!");
+        new import_obsidian6.Notice("✅ Successfully authenticated with Google Drive!");
         console.log("Google Drive authentication successful");
       } catch (error) {
         console.error("Failed to exchange auth code:", error);
-        new import_obsidian5.Notice("Authentication failed: " + error.message);
+        new import_obsidian6.Notice("Authentication failed: " + error.message);
       }
     });
     modal.open();
@@ -2273,10 +2319,10 @@ class ObsidianSyncPlugin extends import_obsidian5.Plugin {
         await this.googleAuthService.revokeTokens();
         this.settings.googleTokens = null;
         await this.saveData(this.settings);
-        new import_obsidian5.Notice("Signed out from Google Drive");
+        new import_obsidian6.Notice("Signed out from Google Drive");
       } catch (error) {
         console.error("Failed to sign out:", error);
-        new import_obsidian5.Notice("Failed to sign out: " + error.message);
+        new import_obsidian6.Notice("Failed to sign out: " + error.message);
       }
     }
   }
@@ -2329,7 +2375,7 @@ class ObsidianSyncPlugin extends import_obsidian5.Plugin {
         try {
           const result = await this.syncService.syncVault();
           if (result.downloadedFiles && result.downloadedFiles > 0) {
-            new import_obsidian5.Notice(`Downloaded ${result.downloadedFiles} file(s) from remote`);
+            new import_obsidian6.Notice(`Downloaded ${result.downloadedFiles} file(s) from remote`);
           }
         } catch (error) {
           console.error("  ❌ Remote check failed:", error);
@@ -2361,7 +2407,7 @@ class ObsidianSyncPlugin extends import_obsidian5.Plugin {
         const newFilesFound = await this.syncService.reconcileIndex();
         if (newFilesFound > 0) {
           console.log(`  ✅ Found and uploaded ${newFilesFound} untracked file(s)`);
-          new import_obsidian5.Notice(`Found and uploaded ${newFilesFound} untracked file(s)`);
+          new import_obsidian6.Notice(`Found and uploaded ${newFilesFound} untracked file(s)`);
           await this.saveSyncState();
         }
       } catch (error) {
@@ -2407,10 +2453,10 @@ class ObsidianSyncPlugin extends import_obsidian5.Plugin {
       if (result.success) {
         if (result.downloadedFiles && result.downloadedFiles > 0) {
           console.log(`  ✅ Initial sync: Downloaded ${result.downloadedFiles} file(s) from remote`);
-          new import_obsidian5.Notice(`Initial sync: Downloaded ${result.downloadedFiles} file(s) from remote`);
+          new import_obsidian6.Notice(`Initial sync: Downloaded ${result.downloadedFiles} file(s) from remote`);
         } else if (result.uploadedFiles && result.uploadedFiles > 0) {
           console.log(`  ✅ Initial sync: Uploaded ${result.uploadedFiles} file(s) to remote`);
-          new import_obsidian5.Notice(`Initial sync: Uploaded ${result.uploadedFiles} file(s) to remote`);
+          new import_obsidian6.Notice(`Initial sync: Uploaded ${result.uploadedFiles} file(s) to remote`);
         } else {
           console.log("  ✅ Initial sync: Vault is up to date");
         }
@@ -2423,15 +2469,15 @@ class ObsidianSyncPlugin extends import_obsidian5.Plugin {
   }
   async syncVault() {
     if (!this.settings.vaultId) {
-      new import_obsidian5.Notice("Please set a vault ID in the plugin settings");
+      new import_obsidian6.Notice("Please set a vault ID in the plugin settings");
       return;
     }
     if (!this.syncService) {
-      new import_obsidian5.Notice("Sync service not initialized");
+      new import_obsidian6.Notice("Sync service not initialized");
       return;
     }
     try {
-      new import_obsidian5.Notice("Starting vault sync...");
+      new import_obsidian6.Notice("Starting vault sync...");
       const result = await this.syncService.syncVault();
       if (result.success) {
         let message = `Sync completed`;
@@ -2447,32 +2493,16 @@ class ObsidianSyncPlugin extends import_obsidian5.Plugin {
         if (result.conflicts && result.conflicts > 0) {
           message += ` ⚠${result.conflicts}`;
         }
-        new import_obsidian5.Notice(message);
+        new import_obsidian6.Notice(message);
         this.pendingChanges.clear();
         console.log("Pending changes cleared");
         await this.saveSyncState();
       } else {
-        new import_obsidian5.Notice(`Sync failed: ${result.message}`);
+        new import_obsidian6.Notice(`Sync failed: ${result.message}`);
       }
     } catch (error) {
       console.error("Sync error:", error);
-      new import_obsidian5.Notice("Sync failed: " + error.message);
-    }
-  }
-  async testConnection() {
-    if (!this.syncService) {
-      new import_obsidian5.Notice("Sync service not initialized");
-      return;
-    }
-    try {
-      const connection = await this.syncService.testConnection();
-      if (connection.connected) {
-        new import_obsidian5.Notice(`Server connection successful: ${connection.message}`);
-      } else {
-        new import_obsidian5.Notice(`Server connection failed: ${connection.message}`);
-      }
-    } catch (error) {
-      new import_obsidian5.Notice("Connection test failed: " + error.message);
+      new import_obsidian6.Notice("Sync failed: " + error.message);
     }
   }
   onSettingsChange() {
@@ -2484,7 +2514,7 @@ class ObsidianSyncPlugin extends import_obsidian5.Plugin {
   }
 }
 
-class ObsidianSyncSettingTab extends import_obsidian5.PluginSettingTab {
+class ObsidianSyncSettingTab extends import_obsidian6.PluginSettingTab {
   plugin;
   constructor(app, plugin) {
     super(app, plugin);
@@ -2494,17 +2524,16 @@ class ObsidianSyncSettingTab extends import_obsidian5.PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.createEl("h2", { text: "Obsidian Sync Settings" });
-    containerEl.createEl("h3", { text: "Server Configuration" });
-    new import_obsidian5.Setting(containerEl).setName("Server URL").setDesc("URL of the sync server").addText((text) => text.setPlaceholder("http://localhost:3000").setValue(this.plugin.settings.serverUrl).onChange(async (value) => {
-      this.plugin.settings.serverUrl = value;
-      await this.plugin.saveSettings();
-    }));
+    containerEl.createEl("p", {
+      text: "This plugin syncs your vault directly to Google Drive. No server required!",
+      cls: "setting-item-description"
+    });
     containerEl.createEl("h3", { text: "Google Drive Configuration" });
-    new import_obsidian5.Setting(containerEl).setName("Google Client ID").setDesc("OAuth 2.0 Client ID from Google Cloud Console").addText((text) => text.setPlaceholder("Enter your Google Client ID").setValue(this.plugin.settings.googleClientId).onChange(async (value) => {
+    new import_obsidian6.Setting(containerEl).setName("Google Client ID").setDesc("OAuth 2.0 Client ID from Google Cloud Console").addText((text) => text.setPlaceholder("Enter your Google Client ID").setValue(this.plugin.settings.googleClientId).onChange(async (value) => {
       this.plugin.settings.googleClientId = value;
       await this.plugin.saveSettings();
     }));
-    new import_obsidian5.Setting(containerEl).setName("Google Client Secret").setDesc("OAuth 2.0 Client Secret from Google Cloud Console").addText((text) => {
+    new import_obsidian6.Setting(containerEl).setName("Google Client Secret").setDesc("OAuth 2.0 Client Secret from Google Cloud Console").addText((text) => {
       text.setPlaceholder("Enter your Google Client Secret").setValue(this.plugin.settings.googleClientSecret).onChange(async (value) => {
         this.plugin.settings.googleClientSecret = value;
         await this.plugin.saveSettings();
@@ -2513,7 +2542,7 @@ class ObsidianSyncSettingTab extends import_obsidian5.PluginSettingTab {
       return text;
     });
     containerEl.createEl("h3", { text: "Google Drive Authentication" });
-    const authStatusSetting = new import_obsidian5.Setting(containerEl).setName("Authentication Status").setDesc(this.plugin.isGoogleDriveAuthenticated() ? "✓ Authenticated with Google Drive" : "✗ Not authenticated");
+    const authStatusSetting = new import_obsidian6.Setting(containerEl).setName("Authentication Status").setDesc(this.plugin.isGoogleDriveAuthenticated() ? "✓ Authenticated with Google Drive" : "✗ Not authenticated");
     if (!this.plugin.isGoogleDriveAuthenticated()) {
       authStatusSetting.addButton((button) => button.setButtonText("Authenticate with Google Drive").setCta().onClick(async () => {
         await this.plugin.startGoogleDriveOAuth();
@@ -2525,32 +2554,32 @@ class ObsidianSyncSettingTab extends import_obsidian5.PluginSettingTab {
       }));
     }
     containerEl.createEl("h3", { text: "Vault Configuration" });
-    new import_obsidian5.Setting(containerEl).setName("Vault ID").setDesc("Unique identifier for this vault").addText((text) => text.setPlaceholder("my-vault").setValue(this.plugin.settings.vaultId).onChange(async (value) => {
+    new import_obsidian6.Setting(containerEl).setName("Vault ID").setDesc("Unique identifier for this vault").addText((text) => text.setPlaceholder("my-vault").setValue(this.plugin.settings.vaultId).onChange(async (value) => {
       this.plugin.settings.vaultId = value;
       await this.plugin.saveSettings();
     }));
     containerEl.createEl("h3", { text: "Sync Settings" });
-    new import_obsidian5.Setting(containerEl).setName("Sync Interval").setDesc("Auto-sync interval in seconds").addSlider((slider) => slider.setLimits(10, 300, 10).setValue(this.plugin.settings.syncInterval).setDynamicTooltip().onChange(async (value) => {
+    new import_obsidian6.Setting(containerEl).setName("Sync Interval").setDesc("Auto-sync interval in seconds").addSlider((slider) => slider.setLimits(10, 300, 10).setValue(this.plugin.settings.syncInterval).setDynamicTooltip().onChange(async (value) => {
       this.plugin.settings.syncInterval = value;
       await this.plugin.saveSettings();
       this.plugin.onSettingsChange();
     }));
-    new import_obsidian5.Setting(containerEl).setName("Auto Sync").setDesc("Automatically sync on file changes").addToggle((toggle) => toggle.setValue(this.plugin.settings.autoSync).onChange(async (value) => {
+    new import_obsidian6.Setting(containerEl).setName("Auto Sync").setDesc("Automatically sync on file changes").addToggle((toggle) => toggle.setValue(this.plugin.settings.autoSync).onChange(async (value) => {
       this.plugin.settings.autoSync = value;
       await this.plugin.saveSettings();
       this.plugin.onSettingsChange();
     }));
-    new import_obsidian5.Setting(containerEl).setName("Conflict Resolution").setDesc("How to handle sync conflicts").addDropdown((dropdown) => dropdown.addOption("local", "Keep local version").addOption("remote", "Keep remote version").addOption("manual", "Ask me each time").setValue(this.plugin.settings.conflictResolution).onChange(async (value) => {
+    new import_obsidian6.Setting(containerEl).setName("Conflict Resolution").setDesc("How to handle sync conflicts").addDropdown((dropdown) => dropdown.addOption("local", "Keep local version").addOption("remote", "Keep remote version").addOption("manual", "Ask me each time").setValue(this.plugin.settings.conflictResolution).onChange(async (value) => {
       this.plugin.settings.conflictResolution = value;
       await this.plugin.saveSettings();
     }));
-    new import_obsidian5.Setting(containerEl).setName("Test Connection").setDesc("Test connection to sync server").addButton((button) => button.setButtonText("Test Connection").setCta().onClick(() => {
+    new import_obsidian6.Setting(containerEl).setName("Test Connection").setDesc("Test connection to sync server").addButton((button) => button.setButtonText("Test Connection").setCta().onClick(() => {
       this.plugin.testConnection();
     }));
   }
 }
 
-class OAuthCallbackModal extends import_obsidian5.Modal {
+class OAuthCallbackModal extends import_obsidian6.Modal {
   callback;
   codeInput;
   constructor(app, callback) {
@@ -2586,7 +2615,7 @@ class OAuthCallbackModal extends import_obsidian5.Modal {
         await this.callback(code);
         this.close();
       } else {
-        new import_obsidian5.Notice("Please enter the authorization code");
+        new import_obsidian6.Notice("Please enter the authorization code");
       }
     });
     this.codeInput.addEventListener("keypress", async (e) => {

@@ -1,7 +1,8 @@
-import { Vault, TFile, normalizePath, requestUrl } from 'obsidian'
+import { Vault, TFile, normalizePath } from 'obsidian'
 import { SyncStateManager } from './syncState'
 import { VaultScanner } from './vaultScanner'
 import { GoogleDriveAuthService } from './googleDriveAuth'
+import { GoogleDriveService, DriveFile } from './googleDriveService'
 
 export interface SyncResult {
   success: boolean
@@ -21,48 +22,65 @@ export interface SyncFile {
   mtime: number
 }
 
-// Client-side sync service that communicates with the server
+export interface FileSyncState {
+  path: string
+  lastSyncedHash: string
+  lastSyncedTime: number
+  lastSyncedSize: number
+  remoteFileId?: string
+}
+
+export interface DownloadCandidate {
+  id: string
+  filePath: string
+  reason: string
+  remoteMtime: number
+  remoteSize: number
+}
+
+export interface UploadCandidate {
+  filePath: string
+  reason: string
+  localMtime: number
+  localSize: number
+}
+
+export interface ConflictCandidate {
+  filePath: string
+  localMtime: number
+  remoteMtime: number
+  localHash: string
+  remoteFileId: string
+}
+
+export interface SyncDelta {
+  toDownload: DownloadCandidate[]
+  toUpload: UploadCandidate[]
+  conflicts: ConflictCandidate[]
+  inSync: number
+  totalRemote: number
+  totalLocal: number
+}
+
+// Serverless sync service that communicates directly with Google Drive
 export class SyncService {
-	private serverUrl: string
 	private vaultId: string
 	private vault: Vault
 	private syncStateManager?: SyncStateManager
 	private vaultScanner: VaultScanner
-	private authService?: GoogleDriveAuthService | null
+	private driveService: GoogleDriveService
 
 	constructor(
-		serverUrl: string,
 		vaultId: string,
 		vault: Vault,
-		syncStateManager?: SyncStateManager,
-		authService?: GoogleDriveAuthService | null
+		authService: GoogleDriveAuthService,
+		syncStateManager?: SyncStateManager
 	) {
-		this.serverUrl = serverUrl
 		this.vaultId = vaultId
 		this.vault = vault
 		this.syncStateManager = syncStateManager
 		this.vaultScanner = new VaultScanner(vault)
-		this.authService = authService
-	}
-
-	/**
-	 * Get authorization headers with Google Drive token
-	 */
-	private async getAuthHeaders(): Promise<Record<string, string>> {
-		const headers: Record<string, string> = {
-			'Content-Type': 'application/json'
-		}
-
-		if (this.authService?.isAuthenticated()) {
-			try {
-				const token = await this.authService.getValidAccessToken()
-				headers['Authorization'] = `Bearer ${token}`
-			} catch (error) {
-				console.error('Failed to get access token:', error)
-			}
-		}
-
-		return headers
+		this.driveService = new GoogleDriveService(authService)
 	}
 
 	async syncVault(): Promise<SyncResult> {
@@ -71,16 +89,18 @@ export class SyncService {
 
 			// Get local index state
 			if (!this.syncStateManager) {
-				console.warn('⚠️  No sync state manager - falling back to basic sync')
-				return await this.syncVaultLegacy()
+				console.warn('⚠️  No sync state manager - cannot sync without it')
+				return {
+					success: false,
+					message: 'No sync state manager available'
+				}
 			}
 
 			const localState = this.syncStateManager.getState()
 			console.log(`📋 Local index: ${Object.keys(localState.files).length} file(s)`)
 
 			// Filter local index to only include files that actually exist locally OR were actually synced
-			// This prevents stale sync-index entries from being sent to the server
-			const validLocalFiles = new Map<string, any>()
+			const validLocalFiles = new Map<string, FileSyncState>()
 			for (const [filePath, fileState] of localState.files.entries()) {
 				const fileExists = this.vault.getAbstractFileByPath(filePath) !== null
 
@@ -125,31 +145,11 @@ export class SyncService {
 				console.log(`✅ Added ${newFilesFound} new file(s) to sync index`)
 			}
 
-			// Send local index to server for delta calculation
-			console.log('📡 Requesting delta from server...')
-			const authHeaders = await this.getAuthHeaders()
-			const deltaResponse = await fetch(`${this.serverUrl}/sync/delta`, {
-				method: 'POST',
-				headers: authHeaders,
-				body: JSON.stringify({
-					vaultId: this.vaultId,
-					localIndex: {
-						files: Object.fromEntries(validLocalFiles)
-					}
-				})
-			})
+			// Calculate delta (moved from server to client)
+			console.log('🔍 Calculating delta...')
+			const delta = await this.calculateDelta(validLocalFiles)
 
-			if (!deltaResponse.ok) {
-				throw new Error(`Delta request failed: ${deltaResponse.statusText}`)
-			}
-
-			const deltaResult = await deltaResponse.json()
-			if (!deltaResult.success || !deltaResult.delta) {
-				throw new Error(`Delta calculation failed: ${deltaResult.message}`)
-			}
-
-			const delta = deltaResult.delta
-			console.log('\n📊 Delta received from server:')
+			console.log('\n📊 Delta calculated:')
 			console.log(`  To Download: ${delta.toDownload.length}`)
 			console.log(`  To Upload: ${delta.toUpload.length}`)
 			console.log(`  Conflicts: ${delta.conflicts.length}`)
@@ -193,17 +193,13 @@ export class SyncService {
 				console.log(`\n⚠️  ${delta.conflicts.length} conflict(s) detected`)
 				for (const conflict of delta.conflicts) {
 					console.log(`  ⚠️  ${conflict.filePath}`)
-					if (this.syncStateManager) {
-						this.syncStateManager.markConflict(conflict.filePath)
-					}
+					this.syncStateManager.markConflict(conflict.filePath)
 				}
 			}
 
 			// Mark sync completed
-			if (this.syncStateManager) {
-				this.syncStateManager.markFullSyncCompleted()
-				this.syncStateManager.markRemoteCheckCompleted()
-			}
+			this.syncStateManager.markFullSyncCompleted()
+			this.syncStateManager.markRemoteCheckCompleted()
 
 			console.log('\n✅ Delta sync completed')
 
@@ -225,121 +221,156 @@ export class SyncService {
 		}
 	}
 
-	// Legacy sync method (fallback if no sync state manager)
-	private async syncVaultLegacy(): Promise<SyncResult> {
-		try {
-			console.log('Using legacy sync method')
+	/**
+	 * Calculate sync delta between local and remote files
+	 * This logic was moved from the server
+	 */
+	private async calculateDelta(localFilesMap: Map<string, FileSyncState>): Promise<SyncDelta> {
+		// Fetch all files from Google Drive
+		console.log('  📥 Fetching remote files from Google Drive...')
+		const listResult = await this.driveService.listFiles(this.vaultId)
 
-			const filesToSync = await this.getFilesToSync()
-			const uploadResults = filesToSync.length > 0 ? await this.uploadFiles(filesToSync) : []
-
-			const remoteChanges = await this.checkRemoteChanges()
-			const downloadResults = await this.downloadFiles(remoteChanges)
-
-			const conflicts = await this.getConflicts()
-
-			return {
-				success: true,
-				message: 'Sync completed successfully (legacy mode)',
-				uploadedFiles: uploadResults.length,
-				downloadedFiles: downloadResults.length,
-				conflicts: conflicts.length,
-				skippedFiles: 0
-			}
-		} catch (error) {
-			console.error('Legacy sync failed:', error)
-			return {
-				success: false,
-				message: `Sync failed: ${error}`
-			}
+		if (!listResult.success) {
+			throw new Error(`Failed to list files: ${listResult.error}`)
 		}
-	}
 
-	private async getFilesToSync(): Promise<SyncFile[]> {
-		const files: SyncFile[] = []
-		const relevantExtensions = ['.md', '.txt', '.pdf', '.png', '.jpg', '.jpeg', '.gif', '.svg']
+		const remoteFiles = listResult.files || []
+		console.log('  ✅ Remote files:', remoteFiles.length)
 
-		try {
-			console.log('📂 Scanning vault using efficient vault.adapter methods...')
-			const startTime = Date.now()
+		// Build maps for efficient lookup
+		const remoteFilesMap = new Map<string, DriveFile>()
+		for (const file of remoteFiles) {
+			remoteFilesMap.set(file.name, file)
+		}
 
-			// Use VaultScanner for efficient file listing
-			const fileMetadata = await this.vaultScanner.scanVault({
-				includeExtensions: relevantExtensions,
-				recursive: true
-			})
+		// Calculate delta
+		const toDownload: DownloadCandidate[] = []
+		const toUpload: UploadCandidate[] = []
+		const conflicts: ConflictCandidate[] = []
+		let inSync = 0
 
-			const scanTime = Date.now() - startTime
-			console.log(`✅ Scanned ${fileMetadata.length} file(s) in ${scanTime}ms`)
+		console.log('\n  🔍 Analyzing differences...')
 
-			// Filter to only files (not folders)
-			const fileItems = fileMetadata.filter(item => !item.isFolder)
+		// Check each remote file
+		for (const remoteFile of remoteFiles) {
+			const filePath = remoteFile.name
+			const localFile = localFilesMap.get(filePath)
+			const remoteMtime = new Date(remoteFile.modifiedTime).getTime()
 
-			for (const fileMeta of fileItems) {
-				try {
-					// Quick check with metadata first (no file read!)
-					if (this.syncStateManager) {
-						// Check if we can skip based on mtime/size alone
-						const fileState = this.syncStateManager.getFileState(fileMeta.path)
-						if (fileState &&
-							fileState.lastSyncedTime === fileMeta.mtime &&
-							fileState.lastSyncedSize === fileMeta.size) {
-							console.log(`⏭️  Skipping unchanged file (quick check): ${fileMeta.path}`)
-							continue
-						}
-					}
+			if (!localFile) {
+				// File exists in Drive but not in local index
+				console.log(`  📥 Missing local: ${filePath}`)
+				toDownload.push({
+					id: remoteFile.id,
+					filePath,
+					reason: 'missing_local',
+					remoteMtime,
+					remoteSize: remoteFile.size
+				})
+			} else {
+				// File exists in both - check if sync needed
+				const localMtime = localFile.lastSyncedTime
 
-					// Need to read file for hash check
-					const file = this.vault.getAbstractFileByPath(fileMeta.path)
-					if (!(file instanceof TFile)) {
-						continue
-					}
-
-					const isBinary = this.isBinaryFile(file.extension)
-					let content: string | ArrayBuffer
-					let hash: string
-
-					if (isBinary) {
-						content = await this.vault.readBinary(file)
-						hash = await this.computeHash(content)
+				// Check if this is the same file (by remote ID)
+				if (localFile.remoteFileId === remoteFile.id) {
+					// Same file - check modification times
+					if (remoteMtime > localMtime) {
+						// Check if local also changed since last sync (would need current hash)
+						// For now, just download if remote is newer
+						console.log(`  📥 Remote newer: ${filePath}`)
+						toDownload.push({
+							id: remoteFile.id,
+							filePath,
+							reason: 'remote_newer',
+							remoteMtime,
+							remoteSize: remoteFile.size
+						})
+					} else if (localMtime > remoteMtime) {
+						// Local is newer - should upload
+						console.log(`  📤 Local newer: ${filePath}`)
+						toUpload.push({
+							filePath,
+							reason: 'local_newer',
+							localMtime,
+							localSize: localFile.lastSyncedSize
+						})
 					} else {
-						content = await this.vault.read(file)
-						hash = await this.computeHash(content)
+						// Same mtime - in sync
+						inSync++
 					}
-
-					// Final check with hash
-					if (this.syncStateManager) {
-						const needsSync = this.syncStateManager.needsSync(
-							fileMeta.path,
-							hash,
-							fileMeta.mtime,
-							fileMeta.size
-						)
-
-						if (!needsSync) {
-							console.log(`⏭️  Skipping unchanged file (hash check): ${fileMeta.path}`)
-							continue
-						}
+				} else {
+					// Different file ID or no remote ID - check timestamps
+					if (remoteMtime > localMtime) {
+						console.log(`  📥 Remote newer (different ID): ${filePath}`)
+						toDownload.push({
+							id: remoteFile.id,
+							filePath,
+							reason: 'remote_newer',
+							remoteMtime,
+							remoteSize: remoteFile.size
+						})
+					} else {
+						inSync++
 					}
-
-					files.push({
-						path: fileMeta.path,
-						content,
-						size: fileMeta.size,
-						hash,
-						isBinary,
-						mtime: fileMeta.mtime
-					})
-				} catch (error) {
-					console.warn(`Failed to read file ${fileMeta.path}:`, error)
 				}
 			}
-		} catch (error) {
-			console.error('Error scanning vault:', error)
 		}
 
-		return files
+		// Check for local files not in remote
+		for (const [filePath, localFile] of localFilesMap.entries()) {
+			const remoteFile = remoteFilesMap.get(filePath)
+
+			if (!remoteFile) {
+				// File exists locally but not in Drive
+
+				// Skip if this is a remote-only tracking entry
+				if (localFile.lastSyncedTime === 0 && localFile.lastSyncedHash === '') {
+					console.log(`  ⏭️  Skipping remote-only tracking entry: ${filePath}`)
+					continue
+				}
+
+				if (!localFile.remoteFileId) {
+					// Never synced before
+					console.log(`  📤 New local file: ${filePath}`)
+					toUpload.push({
+						filePath,
+						reason: 'never_synced',
+						localMtime: localFile.lastSyncedTime,
+						localSize: localFile.lastSyncedSize
+					})
+				} else {
+					// Was synced but deleted from remote
+					console.log(`  📤 Missing remote (was synced): ${filePath}`)
+					toUpload.push({
+						filePath,
+						reason: 'missing_remote',
+						localMtime: localFile.lastSyncedTime,
+						localSize: localFile.lastSyncedSize
+					})
+				}
+			}
+		}
+
+		const delta: SyncDelta = {
+			toDownload,
+			toUpload,
+			conflicts,
+			inSync,
+			totalRemote: remoteFiles.length,
+			totalLocal: localFilesMap.size
+		}
+
+		console.log('\n  📊 Delta Summary:')
+		console.log(`    To Download: ${toDownload.length}`)
+		console.log(`    To Upload: ${toUpload.length}`)
+		console.log(`    Conflicts: ${conflicts.length}`)
+		console.log(`    In Sync: ${inSync}`)
+		console.log(`    Total Remote: ${delta.totalRemote}`)
+		console.log(`    Total Local: ${delta.totalLocal}`)
+
+		return delta
 	}
+
 
 	private isBinaryFile(extension: string): boolean {
 		const binaryExtensions = ['pdf', 'png', 'jpg', 'jpeg', 'gif', 'svg', 'webp', 'mp4', 'mp3', 'wav']
@@ -357,20 +388,6 @@ export class SyncService {
 		return hashArray.map(b => b.toString(16).padStart(2, '0')).join('')
 	}
 
-	// Helper function to convert binary data to base64 without stack overflow
-	private arrayBufferToBase64(buffer: ArrayBuffer): string {
-		const bytes = new Uint8Array(buffer)
-		const chunkSize = 0x8000 // 32KB chunks to avoid stack overflow
-		let binary = ''
-
-		for (let i = 0; i < bytes.length; i += chunkSize) {
-			const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length))
-			binary += String.fromCharCode.apply(null, Array.from(chunk))
-		}
-
-		return btoa(binary)
-	}
-
 	// Helper function to ensure parent folders exist before creating a file
 	private async ensureParentFoldersExist(filePath: string): Promise<void> {
 		const normalizedPath = normalizePath(filePath)
@@ -386,422 +403,6 @@ export class SyncService {
 					await this.vault.createFolder(currentPath)
 					console.log(`  📁 Created folder: ${currentPath}`)
 				}
-			}
-		}
-	}
-
-	private async uploadFiles(files: SyncFile[]): Promise<any[]> {
-		const results: any[] = []
-
-		for (const file of files) {
-			try {
-				// Convert content to base64 for transmission
-				let fileData: string
-				if (file.isBinary) {
-					// Convert ArrayBuffer to base64 using chunked approach
-					fileData = this.arrayBufferToBase64(file.content as ArrayBuffer)
-				} else {
-					// Text content - encode to base64 for consistency
-					fileData = btoa(unescape(encodeURIComponent(file.content as string)))
-				}
-
-				const response = await fetch(`${this.serverUrl}/sync/upload`, {
-					method: 'POST',
-					headers: {
-						'Content-Type': 'application/json'
-					},
-					body: JSON.stringify({
-						vaultId: this.vaultId,
-						filePath: file.path,
-						fileData: fileData,
-						lastModified: Date.now()
-					})
-				})
-
-				if (response.ok) {
-					const result = await response.json()
-					results.push(result)
-					console.log(`Uploaded: ${file.path}`)
-
-					// Mark file as synced with enhanced metadata
-					if (this.syncStateManager && result.data?.fileId) {
-						// Get creation time from vault scanner
-						const metadata = await this.vaultScanner.getFileMetadata(file.path)
-
-						this.syncStateManager.markSynced(
-							file.path,
-							file.hash,
-							file.mtime,
-							file.size,
-							result.data.fileId,
-							{
-								ctime: metadata?.ctime,
-								extension: metadata?.extension,
-								operation: 'upload'
-							}
-						)
-					}
-				} else if (response.status === 401) {
-					throw new Error('Authentication required. Please authenticate with Google Drive in plugin settings.')
-				} else {
-					console.warn(`Failed to upload ${file.path}:`, response.statusText)
-					// Mark error
-					if (this.syncStateManager) {
-						this.syncStateManager.markSyncError(file.path, response.statusText, 'upload')
-					}
-				}
-			} catch (error) {
-				console.error(`Error uploading ${file.path}:`, error)
-				// Mark error
-				if (this.syncStateManager) {
-					this.syncStateManager.markSyncError(file.path, String(error), 'upload')
-				}
-			}
-		}
-
-		return results
-	}
-
-	private async checkRemoteChanges(): Promise<any[]> {
-		try {
-			const authHeaders = await this.getAuthHeaders()
-			const response = await fetch(`${this.serverUrl}/sync/metadata/${this.vaultId}`, {
-				headers: authHeaders
-			})
-
-			if (response.ok) {
-				const metadata = await response.json()
-				return metadata.files || []
-			} else {
-				console.warn('Failed to check remote changes:', response.statusText)
-				return []
-			}
-		} catch (error) {
-			console.error('Error checking remote changes:', error)
-			return []
-		}
-	}
-
-	private async downloadFiles(remoteFiles: any[]): Promise<any[]> {
-		const results: any[] = []
-
-		console.log(`\n🔍 Checking ${remoteFiles.length} remote file(s) for download...`)
-
-		// Get local index state for comparison
-		let localIndexFiles: Set<string> = new Set()
-		if (this.syncStateManager) {
-			const state = this.syncStateManager.getState()
-			localIndexFiles = new Set(state.files.keys())
-			console.log(`📋 Local index contains ${localIndexFiles.size} tracked file(s)`)
-		}
-
-		for (const remoteFile of remoteFiles) {
-			try {
-				// Check if we need to download this file
-				const normalizedPath = normalizePath(remoteFile.filePath)
-				const existingFile = this.vault.getAbstractFileByPath(normalizedPath)
-
-				console.log(`\n📄 Evaluating remote file: ${normalizedPath}`)
-				console.log(`  Remote ID: ${remoteFile.id}`)
-				console.log(`  Remote mtime: ${remoteFile.lastModified}`)
-				console.log(`  Exists in local vault: ${existingFile instanceof TFile}`)
-				console.log(`  Tracked in local index: ${localIndexFiles.has(normalizedPath)}`)
-
-				// Update remote file info in sync state
-				if (this.syncStateManager) {
-					this.syncStateManager.updateRemoteFileInfo(
-						normalizedPath,
-						remoteFile.id,
-						remoteFile.lastModified,
-						remoteFile.hash
-					)
-				}
-
-				// Determine download action using sync state manager
-				let downloadAction: 'download' | 'conflict' | 'skip' = 'skip'
-				let isUpdate = false
-
-				if (this.syncStateManager) {
-					// Get local file info
-					let localMtime = 0
-					let localHash = ''
-					const localExists = existingFile instanceof TFile
-
-					if (localExists) {
-						localMtime = existingFile.stat.mtime
-						const content = this.isBinaryFile(existingFile.extension)
-							? await this.vault.readBinary(existingFile)
-							: await this.vault.read(existingFile)
-						localHash = await this.computeHash(content)
-						console.log(`  Local mtime: ${localMtime}`)
-						console.log(`  Local hash: ${localHash.substring(0, 16)}...`)
-					}
-
-					// Use sync state manager to determine action
-					downloadAction = this.syncStateManager.shouldDownloadRemoteFile(
-						normalizedPath,
-						remoteFile.id,
-						remoteFile.lastModified,
-						localExists,
-						localMtime,
-						localHash
-					)
-
-					console.log(`  Download action: ${downloadAction}`)
-
-					isUpdate = localExists
-				} else {
-					// Fallback if no sync state manager
-					if (!existingFile) {
-						downloadAction = 'download'
-						isUpdate = false
-					}
-				}
-
-				const shouldDownload = (downloadAction === 'download')
-
-				if (downloadAction === 'conflict') {
-					console.warn(`⚠️  CONFLICT: ${normalizedPath}`)
-					// Mark conflict in sync state
-					if (this.syncStateManager) {
-						this.syncStateManager.markConflict(normalizedPath)
-					}
-					// TODO: Show conflict UI
-					// For now, skip conflicted files
-					continue
-				}
-
-				if (shouldDownload) {
-					console.log(`⬇️  Starting download: ${normalizedPath}`)
-					console.log(`  From remote ID: ${remoteFile.id}`)
-
-					// Download the file
-					const authHeaders = await this.getAuthHeaders()
-					const response = await fetch(`${this.serverUrl}/sync/download/${remoteFile.id}`, {
-						headers: authHeaders
-					})
-
-					if (response.status === 401) {
-						throw new Error('Authentication required. Please authenticate with Google Drive in plugin settings.')
-					}
-
-					if (response.ok) {
-						const result = await response.json()
-						if (result.success && result.data && result.data.fileData) {
-							// Decode base64 and write file
-							const base64Data = result.data.fileData
-							const extension = normalizedPath.substring(normalizedPath.lastIndexOf('.')).slice(1)
-							const isBinary = this.isBinaryFile(extension)
-
-							if (isUpdate) {
-								// Update existing file
-								if (isBinary) {
-									const binaryString = atob(base64Data)
-									const bytes = new Uint8Array(binaryString.length)
-									for (let i = 0; i < binaryString.length; i++) {
-										bytes[i] = binaryString.charCodeAt(i)
-									}
-									await this.vault.modifyBinary(existingFile as TFile, bytes.buffer)
-								} else {
-									const textContent = decodeURIComponent(escape(atob(base64Data)))
-									await this.vault.modify(existingFile as TFile, textContent)
-								}
-								console.log(`Updated: ${remoteFile.filePath}`)
-							} else {
-								// Create new file - ensure parent folders exist first
-								await this.ensureParentFoldersExist(normalizedPath)
-
-								if (isBinary) {
-									const binaryString = atob(base64Data)
-									const bytes = new Uint8Array(binaryString.length)
-									for (let i = 0; i < binaryString.length; i++) {
-										bytes[i] = binaryString.charCodeAt(i)
-									}
-									await this.vault.createBinary(normalizedPath, bytes.buffer)
-								} else {
-									const textContent = decodeURIComponent(escape(atob(base64Data)))
-									await this.vault.create(normalizedPath, textContent)
-								}
-								console.log(`Downloaded: ${remoteFile.filePath}`)
-							}
-
-							// Update sync state after successful download
-							if (this.syncStateManager) {
-								// Compute hash of downloaded content
-								let hash: string
-								if (isBinary) {
-									const binaryString = atob(base64Data)
-									const bytes = new Uint8Array(binaryString.length)
-									for (let i = 0; i < binaryString.length; i++) {
-										bytes[i] = binaryString.charCodeAt(i)
-									}
-									hash = await this.computeHash(bytes.buffer)
-								} else {
-									const textContent = decodeURIComponent(escape(atob(base64Data)))
-									hash = await this.computeHash(textContent)
-								}
-
-								this.syncStateManager.markSynced(
-									normalizedPath,
-									hash,
-									remoteFile.lastModified,
-									remoteFile.size,
-									remoteFile.id
-								)
-							}
-
-							results.push(result)
-						}
-					} else {
-						console.warn(`Failed to download ${remoteFile.filePath}:`, response.statusText)
-					}
-				}
-			} catch (error) {
-				console.error(`Error downloading ${remoteFile.filePath}:`, error)
-			}
-		}
-
-		return results
-	}
-
-	public async getConflicts(): Promise<any[]> {
-		try {
-			const authHeaders = await this.getAuthHeaders()
-			const response = await fetch(`${this.serverUrl}/sync/conflicts`, {
-				headers: authHeaders
-			})
-
-			if (response.ok) {
-				const result = await response.json()
-				return result.data?.conflicts || []
-			} else {
-				console.warn('Failed to check conflicts:', response.statusText)
-				return []
-			}
-		} catch (error) {
-			console.error('Error checking conflicts:', error)
-			return []
-		}
-	}
-
-	// Method to resolve conflicts with the server
-	async resolveConflict(conflictId: string, strategy: 'local' | 'remote' | 'manual', resolvedContent?: string): Promise<boolean> {
-		try {
-			const response = await fetch(`${this.serverUrl}/sync/resolve-conflict`, {
-				method: 'POST',
-				headers: await this.getAuthHeaders(),
-				body: JSON.stringify({
-					conflictId,
-					strategy,
-					resolvedContent
-				})
-			})
-
-			if (response.ok) {
-				const result = await response.json()
-				return result.success || false
-			} else {
-				console.warn('Failed to resolve conflict:', response.statusText)
-				return false
-			}
-		} catch (error) {
-			console.error('Error resolving conflict:', error)
-			return false
-		}
-	}
-
-	// Method to auto-resolve conflicts
-	async autoResolveConflict(conflictId: string): Promise<any> {
-		try {
-			const response = await fetch(`${this.serverUrl}/sync/auto-resolve`, {
-				method: 'POST',
-				headers: await this.getAuthHeaders(),
-				body: JSON.stringify({
-					conflictId
-				})
-			})
-
-			if (response.ok) {
-				return await response.json()
-			} else {
-				console.warn('Failed to auto-resolve conflict:', response.statusText)
-				return { success: false }
-			}
-		} catch (error) {
-			console.error('Error auto-resolving conflict:', error)
-			return { success: false }
-		}
-	}
-
-	// Method to watch files on the server
-	async watchFiles(filePaths: string[]): Promise<boolean> {
-		try {
-			for (const filePath of filePaths) {
-				const response = await fetch(`${this.serverUrl}/sync/watch`, {
-					method: 'POST',
-					headers: {
-						'Content-Type': 'application/json'
-					},
-					body: JSON.stringify({
-						filePath
-					})
-				})
-
-				if (!response.ok) {
-					console.warn(`Failed to watch file ${filePath}:`, response.statusText)
-				}
-			}
-			return true
-		} catch (error) {
-			console.error('Error setting up file watching:', error)
-			return false
-		}
-	}
-
-	// Method to get file changes from server
-	async getFileChanges(): Promise<any> {
-		try {
-			const authHeaders = await this.getAuthHeaders()
-			const response = await fetch(`${this.serverUrl}/sync/changes`, {
-				headers: authHeaders
-			})
-
-			if (response.ok) {
-				return await response.json()
-			} else {
-				console.warn('Failed to get file changes:', response.statusText)
-				return { success: false }
-			}
-		} catch (error) {
-			console.error('Error getting file changes:', error)
-			return { success: false }
-		}
-	}
-
-	// Method to test server connection
-	async testConnection(): Promise<{ connected: boolean; message: string }> {
-		try {
-			const authHeaders = await this.getAuthHeaders()
-			const response = await fetch(`${this.serverUrl}/health`, {
-				headers: authHeaders
-			})
-
-			if (response.ok) {
-				const health = await response.json()
-				return {
-					connected: true,
-					message: `Server is healthy. Version: ${health.version}`
-				}
-			} else {
-				return {
-					connected: false,
-					message: `Server responded with status: ${response.status}`
-				}
-			}
-		} catch (error) {
-			return {
-				connected: false,
-				message: `Connection failed: ${error}`
 			}
 		}
 	}
@@ -1104,123 +705,85 @@ export class SyncService {
 		}
 	}
 
-	// Upload a single file to the server
+	// Upload a single file to Google Drive
 	private async uploadSingleFile(file: TFile): Promise<void> {
 		const isBinary = this.isBinaryFile(file.extension)
 		const content = isBinary ? await this.vault.readBinary(file) : await this.vault.read(file)
 		const hash = await this.computeHash(content)
 
-		// Convert content to base64
-		let fileData: string
+		// Determine MIME type
+		const mimeType = this.getMimeType(file.extension)
+
+		// Convert content to ArrayBuffer if it's a string
+		let fileData: ArrayBuffer
 		if (isBinary) {
-			// Use chunked approach to avoid stack overflow with large files
-			fileData = this.arrayBufferToBase64(content as ArrayBuffer)
+			fileData = content as ArrayBuffer
 		} else {
-			fileData = btoa(unescape(encodeURIComponent(content as string)))
+			const encoder = new TextEncoder()
+			fileData = encoder.encode(content as string).buffer
 		}
 
-		const response = await fetch(`${this.serverUrl}/sync/upload`, {
-			method: 'POST',
-			headers: {
-				'Content-Type': 'application/json'
-			},
-			body: JSON.stringify({
-				vaultId: this.vaultId,
-				filePath: file.path,
-				fileData: fileData,
-				lastModified: file.stat.mtime
-			})
-		})
+		// Upload to Google Drive
+		const result = await this.driveService.uploadFile(
+			file.path,
+			fileData,
+			mimeType,
+			this.vaultId
+		)
 
-		if (response.ok) {
-			const result = await response.json()
-			if (result.success && this.syncStateManager) {
-				const metadata = await this.vaultScanner.getFileMetadata(file.path)
-				this.syncStateManager.markSynced(
-					file.path,
-					hash,
-					file.stat.mtime,
-					file.stat.size,
-					result.data?.fileId,
-					{
-						ctime: metadata?.ctime,
-						extension: metadata?.extension,
-						operation: 'upload'
-					}
-				)
-			}
+		if (result.success && this.syncStateManager) {
+			const metadata = await this.vaultScanner.getFileMetadata(file.path)
+			this.syncStateManager.markSynced(
+				file.path,
+				hash,
+				file.stat.mtime,
+				file.stat.size,
+				result.fileId,
+				{
+					ctime: metadata?.ctime,
+					extension: metadata?.extension,
+					operation: 'upload'
+				}
+			)
 		} else {
 			if (this.syncStateManager) {
-				this.syncStateManager.markSyncError(file.path, response.statusText, 'upload')
+				this.syncStateManager.markSyncError(file.path, result.error || 'Unknown error', 'upload')
 			}
-			throw new Error(`Upload failed: ${response.statusText}`)
+			throw new Error(`Upload failed: ${result.error}`)
 		}
 	}
 
-	// Download a single file from the server
-	private async downloadSingleFile(fileInfo: any): Promise<void> {
-		const authHeaders = await this.getAuthHeaders()
-		const response = await fetch(`${this.serverUrl}/sync/download/${fileInfo.id}`, {
-			headers: authHeaders
-		})
+	// Download a single file from Google Drive
+	private async downloadSingleFile(fileInfo: DownloadCandidate): Promise<void> {
+		const result = await this.driveService.downloadFile(fileInfo.id)
 
-		if (response.status === 401) {
-			throw new Error('Authentication required')
-		}
-
-		if (!response.ok) {
-			throw new Error(`Download failed: ${response.statusText}`)
-		}
-
-		const result = await response.json()
-		if (!result.success || !result.data || !result.data.fileData) {
-			throw new Error('Invalid download response')
+		if (!result.success || !result.data) {
+			throw new Error(`Download failed: ${result.error}`)
 		}
 
 		const normalizedPath = normalizePath(fileInfo.filePath)
 		const existingFile = this.vault.getAbstractFileByPath(normalizedPath)
 		const extension = normalizedPath.substring(normalizedPath.lastIndexOf('.')).slice(1)
 		const isBinary = this.isBinaryFile(extension)
-		const base64Data = result.data.fileData
+		const fileData = result.data
 
-		// Decode and write file
+		// Write file
 		if (existingFile instanceof TFile) {
 			// Update existing file
 			if (isBinary) {
-				const binaryString = atob(base64Data)
-				const bytes = new Uint8Array(binaryString.length)
-				for (let i = 0; i < binaryString.length; i++) {
-					bytes[i] = binaryString.charCodeAt(i)
-				}
-				await this.vault.modifyBinary(existingFile, bytes.buffer)
+				await this.vault.modifyBinary(existingFile, fileData)
 			} else {
-				const textContent = decodeURIComponent(escape(atob(base64Data)))
+				const textContent = new TextDecoder().decode(fileData)
 				await this.vault.modify(existingFile, textContent)
 			}
 		} else {
 			// Create new file (ensure parent directories exist)
-			const parentPath = normalizedPath.substring(0, normalizedPath.lastIndexOf('/'))
-			if (parentPath && !this.vault.getAbstractFileByPath(parentPath)) {
-				// Create parent directories recursively
-				const parts = parentPath.split('/')
-				let currentPath = ''
-				for (const part of parts) {
-					currentPath = currentPath ? `${currentPath}/${part}` : part
-					if (!this.vault.getAbstractFileByPath(currentPath)) {
-						await this.vault.createFolder(currentPath)
-					}
-				}
-			}
+			await this.ensureParentFoldersExist(normalizedPath)
 
 			if (isBinary) {
-				const binaryString = atob(base64Data)
-				const bytes = new Uint8Array(binaryString.length)
-				for (let i = 0; i < binaryString.length; i++) {
-					bytes[i] = binaryString.charCodeAt(i)
-				}
-				await this.vault.createBinary(normalizedPath, bytes.buffer)
+				await this.vault.createBinary(normalizedPath, fileData)
 			} else {
-				const textContent = decodeURIComponent(escape(atob(base64Data)))
+				const textContent = new TextDecoder().decode(fileData)
 				await this.vault.create(normalizedPath, textContent)
 			}
 		}
@@ -1247,5 +810,24 @@ export class SyncService {
 				)
 			}
 		}
+	}
+
+	// Get MIME type based on file extension
+	private getMimeType(extension: string): string {
+		const mimeTypes: Record<string, string> = {
+			'md': 'text/markdown',
+			'txt': 'text/plain',
+			'pdf': 'application/pdf',
+			'png': 'image/png',
+			'jpg': 'image/jpeg',
+			'jpeg': 'image/jpeg',
+			'gif': 'image/gif',
+			'svg': 'image/svg+xml',
+			'mp4': 'video/mp4',
+			'webm': 'video/webm',
+			'mp3': 'audio/mpeg',
+			'wav': 'audio/wav'
+		}
+		return mimeTypes[extension.toLowerCase()] || 'application/octet-stream'
 	}
 }
