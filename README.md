@@ -29,7 +29,32 @@ A local-first Obsidian plugin for seamless vault synchronization with Google Dri
 3. Click Install
 4. Enable the plugin
 
-#### Option B: Manual Installation
+#### Option B: Quick Install from Latest Release (Recommended)
+Use the installer script to automatically download and install from the latest GitHub release:
+
+```bash
+# Using npx (Node.js)
+npx @techsavvyash/vync-installer /path/to/your/vault
+
+# Using bunx (Bun)
+bunx @techsavvyash/vync-installer /path/to/your/vault
+```
+
+**Examples:**
+```bash
+# Linux/macOS
+npx @techsavvyash/vync-installer ~/Documents/MyVault
+
+# Windows
+npx @techsavvyash/vync-installer "C:\Users\YourName\Documents\MyVault"
+```
+
+The installer will:
+- Fetch the latest release from GitHub
+- Download `main.js`, `manifest.json`, and `styles.css`
+- Install them to `.obsidian/plugins/vync/` in your vault
+
+#### Option C: Manual Installation
 ```bash
 # Clone and build
 git clone <repository-url>
@@ -149,6 +174,67 @@ When ready to publish:
    - Fork [obsidian-releases](https://github.com/obsidianmd/obsidian-releases)
    - Add your plugin to `community-plugins.json`
    - Submit PR
+
+### Publishing the Installer to NPM
+
+The installer package (`@techsavvyash/vync-installer`) can be published to NPM for easy installation via `npx` or `bunx`.
+
+#### Prerequisites
+
+1. **NPM Account** - Create an account at [npmjs.com](https://www.npmjs.com/)
+2. **NPM Token** - Generate an automation token:
+   - Go to npmjs.com → Account Settings → Access Tokens
+   - Generate New Token → Automation
+   - Copy the token
+
+3. **Add Token to GitHub Secrets**
+   - Go to GitHub Repository → Settings → Secrets and variables → Actions
+   - Add new secret: `NPM_TOKEN` with your token value
+
+#### Publishing Steps
+
+**Option 1: Using GitHub Actions (Recommended)**
+
+1. Go to Actions → "Publish Installer to NPM"
+2. Click "Run workflow"
+3. Enter the version number (e.g., `0.0.2`)
+4. Click "Run workflow"
+
+The workflow will:
+- Update the version in `package.json`
+- Build the installer
+- Publish to NPM
+- Commit the version bump
+
+**Option 2: Manual Publishing**
+
+```bash
+# Navigate to installer package
+cd packages/installer
+
+# Login to NPM (first time only)
+npm login
+
+# Update version
+npm version 0.0.2
+
+# Build
+bun run build
+
+# Publish
+npm publish --access public
+```
+
+#### After Publishing
+
+Users can install the plugin using:
+```bash
+npx @techsavvyash/vync-installer /path/to/vault
+```
+
+**Note:** It may take a few minutes for the package to be available on NPM after publishing.
+
+**📖 Detailed Publishing Guide:** See [PUBLISHING.md](PUBLISHING.md) for complete step-by-step instructions.
 
 ## 📊 How It Works
 
