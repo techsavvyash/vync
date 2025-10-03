@@ -7,6 +7,8 @@ export interface DriveFile {
   mimeType: string
   size: number
   modifiedTime: string
+  headRevisionId?: string // Authoritative version identifier
+  appProperties?: Record<string, string> // Custom metadata for sync logic
   webContentLink?: string
   webViewLink?: string
 }
@@ -14,6 +16,7 @@ export interface DriveFile {
 export interface UploadResult {
   success: boolean
   fileId?: string
+  headRevisionId?: string
   error?: string
 }
 
@@ -221,7 +224,8 @@ export class GoogleDriveService {
     filePath: string,
     fileData: ArrayBuffer,
     mimeType: string,
-    vaultId: string
+    vaultId: string,
+    appProperties?: Record<string, string>
   ): Promise<UploadResult> {
     console.log('  🔵 GoogleDriveService.uploadFile() called')
     console.log('    File path:', filePath)
@@ -270,6 +274,7 @@ export class GoogleDriveService {
       console.log('    Found', existingFiles.length, 'existing file(s)')
 
       let fileId: string
+      let headRevisionId: string | undefined
 
       if (existingFiles.length > 0) {
         // Update existing file
@@ -296,18 +301,23 @@ export class GoogleDriveService {
 
         const base64Data = arrayBufferToBase64(fileData)
 
+        const fileMetadata: any = { mimeType }
+        if (appProperties) {
+          fileMetadata.appProperties = appProperties
+        }
+
         const multipartRequestBody =
           delimiter +
           'Content-Type: application/json\r\n\r\n' +
-          JSON.stringify({ mimeType }) +
+          JSON.stringify(fileMetadata) +
           delimiter +
           'Content-Type: ' + mimeType + '\r\n' +
           'Content-Transfer-Encoding: base64\r\n\r\n' +
           base64Data +
           closeDelimiter
 
-        await requestUrl({
-          url: `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart`,
+        const updateResponse = await requestUrl({
+          url: `https://www.googleapis.com/upload/drive/v3/files/${fileId}?uploadType=multipart&fields=id,headRevisionId`,
           method: 'PATCH',
           headers: {
             'Authorization': `Bearer ${accessToken}`,
@@ -317,6 +327,7 @@ export class GoogleDriveService {
         })
 
         console.log('    ✅ File UPDATED')
+        headRevisionId = updateResponse.json.headRevisionId
       } else {
         // Create new file
         console.log('    ➕ Creating new file...')
@@ -327,10 +338,14 @@ export class GoogleDriveService {
 
         const base64Data = arrayBufferToBase64(fileData)
 
-        const metadata = {
+        const metadata: any = {
           name: fileName,
           mimeType: mimeType,
           parents: [targetFolderId]
+        }
+
+        if (appProperties) {
+          metadata.appProperties = appProperties
         }
 
         const multipartRequestBody =
@@ -344,7 +359,7 @@ export class GoogleDriveService {
           closeDelimiter
 
         const createResponse = await requestUrl({
-          url: 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',
+          url: 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,headRevisionId',
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${accessToken}`,
@@ -354,13 +369,16 @@ export class GoogleDriveService {
         })
 
         fileId = createResponse.json.id
+        headRevisionId = createResponse.json.headRevisionId
         console.log('    ✅ File CREATED')
       }
 
       console.log('    File ID:', fileId)
+      console.log('    Head Revision ID:', headRevisionId)
       return {
         success: true,
-        fileId
+        fileId,
+        headRevisionId
       }
     } catch (error) {
       console.error('    ❌ Error uploading file:', error)
@@ -427,7 +445,7 @@ export class GoogleDriveService {
 
       do {
         pageCount++
-        let url = `https://www.googleapis.com/drive/v3/files?q='${vaultFolderId}' in parents and trashed=false and mimeType != 'application/vnd.google-apps.folder'&fields=files(id,name,mimeType,modifiedTime,size,webContentLink,webViewLink),nextPageToken&pageSize=1000&orderBy=modifiedTime desc`
+        let url = `https://www.googleapis.com/drive/v3/files?q='${vaultFolderId}' in parents and trashed=false and mimeType != 'application/vnd.google-apps.folder'&fields=files(id,name,mimeType,modifiedTime,size,headRevisionId,appProperties,webContentLink,webViewLink),nextPageToken&pageSize=1000&orderBy=modifiedTime desc`
 
         if (pageToken) {
           url += `&pageToken=${pageToken}`
@@ -450,6 +468,8 @@ export class GoogleDriveService {
           mimeType: file.mimeType,
           size: parseInt(file.size || '0'),
           modifiedTime: file.modifiedTime,
+          headRevisionId: file.headRevisionId,
+          appProperties: file.appProperties,
           webContentLink: file.webContentLink,
           webViewLink: file.webViewLink
         }))
@@ -503,6 +523,128 @@ export class GoogleDriveService {
   }
 
   /**
+   * Get start page token for changes.list API
+   * This represents the current state of the Drive and is used for incremental sync
+   */
+  async getStartPageToken(): Promise<{ success: boolean; pageToken?: string; error?: string }> {
+    try {
+      const accessToken = await this.authService.getValidAccessToken()
+
+      const response = await requestUrl({
+        url: 'https://www.googleapis.com/drive/v3/changes/startPageToken',
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`
+        }
+      })
+
+      return {
+        success: true,
+        pageToken: response.json.startPageToken
+      }
+    } catch (error) {
+      console.error('Error getting start page token:', error)
+      return {
+        success: false,
+        error: `Failed to get start page token: ${error}`
+      }
+    }
+  }
+
+  /**
+   * Get changes since the given page token
+   * This is more efficient than listing all files
+   */
+  async getChanges(pageToken: string, vaultId: string): Promise<{
+    success: boolean
+    changes?: Array<{ fileId: string; file?: DriveFile; removed?: boolean }>
+    newPageToken?: string
+    error?: string
+  }> {
+    try {
+      console.log('📥 Fetching changes from Google Drive...')
+      console.log('  Page token:', pageToken)
+
+      const accessToken = await this.authService.getValidAccessToken()
+
+      // Get vault folder to filter changes
+      const vaultFolderId = await this.getOrCreateVaultFolder(vaultId)
+      if (!vaultFolderId) {
+        return {
+          success: false,
+          error: 'Failed to get vault folder'
+        }
+      }
+
+      const changes: Array<{ fileId: string; file?: DriveFile; removed?: boolean }> = []
+      let currentPageToken = pageToken
+      let hasMore = true
+
+      while (hasMore) {
+        const response = await requestUrl({
+          url: `https://www.googleapis.com/drive/v3/changes?pageToken=${currentPageToken}&fields=changes(fileId,removed,file(id,name,mimeType,modifiedTime,size,headRevisionId,appProperties,parents)),newStartPageToken,nextPageToken&pageSize=1000`,
+          method: 'GET',
+          headers: {
+            'Authorization': `Bearer ${accessToken}`
+          }
+        })
+
+        const responseChanges = response.json.changes || []
+        console.log(`  Found ${responseChanges.length} change(s) in this page`)
+
+        // Filter changes to only include files in our vault folder
+        for (const change of responseChanges) {
+          // Check if file is removed or if it's in our vault folder
+          if (change.removed) {
+            changes.push({
+              fileId: change.fileId,
+              removed: true
+            })
+          } else if (change.file && change.file.parents && change.file.parents.includes(vaultFolderId)) {
+            // Only include files, not folders
+            if (change.file.mimeType !== 'application/vnd.google-apps.folder') {
+              changes.push({
+                fileId: change.fileId,
+                file: {
+                  id: change.file.id,
+                  name: change.file.name,
+                  mimeType: change.file.mimeType,
+                  size: parseInt(change.file.size || '0'),
+                  modifiedTime: change.file.modifiedTime,
+                  headRevisionId: change.file.headRevisionId,
+                  appProperties: change.file.appProperties
+                }
+              })
+            }
+          }
+        }
+
+        // Check if there are more pages
+        if (response.json.nextPageToken) {
+          currentPageToken = response.json.nextPageToken
+        } else {
+          hasMore = false
+          currentPageToken = response.json.newStartPageToken
+        }
+      }
+
+      console.log(`  ✅ Total changes affecting vault: ${changes.length}`)
+
+      return {
+        success: true,
+        changes,
+        newPageToken: currentPageToken
+      }
+    } catch (error) {
+      console.error('Error getting changes:', error)
+      return {
+        success: false,
+        error: `Failed to get changes: ${error}`
+      }
+    }
+  }
+
+  /**
    * Get file metadata from Google Drive
    */
   async getFileMetadata(fileId: string): Promise<{ success: boolean; file?: DriveFile; error?: string }> {
@@ -510,7 +652,7 @@ export class GoogleDriveService {
       const accessToken = await this.authService.getValidAccessToken()
 
       const response = await requestUrl({
-        url: `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,mimeType,modifiedTime,size,webContentLink,webViewLink`,
+        url: `https://www.googleapis.com/drive/v3/files/${fileId}?fields=id,name,mimeType,modifiedTime,size,headRevisionId,appProperties,webContentLink,webViewLink`,
         method: 'GET',
         headers: {
           'Authorization': `Bearer ${accessToken}`
@@ -523,6 +665,8 @@ export class GoogleDriveService {
         mimeType: response.json.mimeType,
         size: parseInt(response.json.size || '0'),
         modifiedTime: response.json.modifiedTime,
+        headRevisionId: response.json.headRevisionId,
+        appProperties: response.json.appProperties,
         webContentLink: response.json.webContentLink,
         webViewLink: response.json.webViewLink
       }

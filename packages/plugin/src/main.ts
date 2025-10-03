@@ -18,6 +18,10 @@ interface ObsidianSyncSettings {
 	autoSync: boolean
 	conflictResolution: 'local' | 'remote' | 'manual'
 	syncState?: any // Persisted sync state (deprecated, moved to JSON file)
+
+	// Sync algorithm settings
+	syncAgentId?: string // Unique ID for this device/plugin instance (for infinite loop prevention)
+	pageToken?: string // Google Drive changes.list pageToken (for incremental sync)
 }
 
 const DEFAULT_SETTINGS: ObsidianSyncSettings = {
@@ -28,7 +32,9 @@ const DEFAULT_SETTINGS: ObsidianSyncSettings = {
 	syncInterval: 30, // seconds
 	autoSync: true,
 	conflictResolution: 'manual',
-	syncState: null
+	syncState: null,
+	syncAgentId: undefined, // Generated on first run
+	pageToken: undefined // Initialized on first sync
 }
 
 export default class ObsidianSyncPlugin extends Plugin {
@@ -38,22 +44,27 @@ export default class ObsidianSyncPlugin extends Plugin {
 	private googleAuthService: GoogleDriveAuthService | null = null
 
 	// Sync services
-	private syncTimer: NodeJS.Timeout | null = null
-	private remoteCheckTimer: NodeJS.Timeout | null = null // Scheduled remote check
-	private indexReconcileTimer: NodeJS.Timeout | null = null // Timer for index reconciliation
+	private syncTimer: NodeJS.Timeout | null = null // Periodic sync timer (5-10 min)
 	private vaultWatcher: VaultWatcherService | null = null
 	private syncService: SyncService | null = null
 	private conflictUI: ConflictUIService | null = null
 	private syncStateManager: SyncStateManager | null = null
 	private syncIndexFile: SyncIndexFile | null = null // NEW: JSON file manager
 	private pendingChanges: Set<string> = new Set() // Track files with pending changes
-	private syncDebounceTimer: NodeJS.Timeout | null = null
+	private syncDebounceTimer: NodeJS.Timeout | null = null // Debounced sync (3s after last change)
 
 	// OAuth callback server
 	private callbackServer: any = null
 
 	async onload() {
 		await this.loadSettings()
+
+		// Generate syncAgentId if it doesn't exist (for infinite loop prevention)
+		if (!this.settings.syncAgentId) {
+			this.settings.syncAgentId = this.generateUUID()
+			await this.saveSettings()
+			console.log('Generated new syncAgentId:', this.settings.syncAgentId)
+		}
 
 		// Initialize Google Drive
 		await this.initializeGoogleDrive()
@@ -118,8 +129,6 @@ export default class ObsidianSyncPlugin extends Plugin {
 
 	onunload() {
 		this.stopAutoSync()
-		this.stopRemoteCheck()
-		this.stopIndexReconciliation()
 		if (this.vaultWatcher) {
 			this.vaultWatcher.stopWatching()
 		}
@@ -150,7 +159,8 @@ export default class ObsidianSyncPlugin extends Plugin {
 				this.settings.vaultId,
 				this.app.vault,
 				this.googleAuthService,
-				this.syncStateManager
+				this.syncStateManager,
+				this.settings.syncAgentId // Pass syncAgentId for echo detection
 			)
 
 			// Initialize conflict UI service
@@ -196,46 +206,16 @@ export default class ObsidianSyncPlugin extends Plugin {
 						}
 					}
 				} else {
-					// Handle file changes with immediate sync for better responsiveness
+					// Track file changes for debounced sync
 					console.log(`File ${change.changeType}: ${change.filePath}`)
 
-					// Handle individual file events immediately for real-time sync
-					if (this.syncService && this.settings.autoSync) {
-						try {
-							switch (change.changeType) {
-								case 'created':
-									// Immediately handle new file creation
-									await this.syncService.handleFileCreation(change.filePath)
-									await this.saveSyncState()
-									break
-
-								case 'modified':
-									// Immediately handle file modification
-									await this.syncService.handleFileModification(change.filePath)
-									await this.saveSyncState()
-									break
-
-								case 'deleted':
-									// Handle file deletion
-									await this.syncService.handleFileDeletion(change.filePath)
-									await this.saveSyncState()
-									break
-							}
-						} catch (error) {
-							console.error(`Failed to handle ${change.changeType} event for ${change.filePath}:`, error)
-							// Add to pending changes for retry in batch sync
-							this.pendingChanges.add(change.filePath)
-						}
-					} else {
-						// If auto-sync is off or service not ready, just track the change
-						this.pendingChanges.add(change.filePath)
-					}
+					// Track the change for debounced batch sync
+					this.pendingChanges.add(change.filePath)
 				}
 
-				// Still use debounced sync for batch operations and as a safety net
-				// This ensures any failures in immediate sync are retried
+				// Trigger debounced sync to batch process all pending changes
+				// This coalesces rapid changes and reduces API calls
 				if (this.settings.autoSync && this.pendingChanges.size > 0) {
-					// Trigger a full sync after a delay to catch any missed changes
 					this.debouncedSync()
 				}
 			})
@@ -247,12 +227,6 @@ export default class ObsidianSyncPlugin extends Plugin {
 			if (this.settings.autoSync) {
 				this.startAutoSync()
 			}
-
-			// Start scheduled remote check (every 2 minutes)
-			this.startRemoteCheck()
-
-			// Start periodic index reconciliation (every 5 minutes)
-			this.startIndexReconciliation()
 
 			// Perform initial sync on startup to check for remote changes
 			this.performInitialSync()
@@ -431,13 +405,13 @@ export default class ObsidianSyncPlugin extends Plugin {
 			clearTimeout(this.syncDebounceTimer)
 		}
 
-		// Set new debounce timer (wait 2 seconds after last change)
+		// Set new debounce timer (wait 3 seconds after last change)
 		this.syncDebounceTimer = setTimeout(() => {
 			if (this.pendingChanges.size > 0) {
 				console.log(`Syncing ${this.pendingChanges.size} changed file(s)...`)
 				this.syncVault()
 			}
-		}, 2000) // 2 second debounce
+		}, 3000) // 3 second debounce
 	}
 
 	private startAutoSync() {
@@ -462,114 +436,6 @@ export default class ObsidianSyncPlugin extends Plugin {
 		if (this.syncTimer) {
 			clearInterval(this.syncTimer)
 			this.syncTimer = null
-		}
-	}
-
-	private startRemoteCheck() {
-		// Clear existing timer
-		if (this.remoteCheckTimer) {
-			clearInterval(this.remoteCheckTimer)
-		}
-
-		console.log('🔍 Starting remote check timer (every 2 minutes)...')
-
-		// Check remote every 2 minutes
-		this.remoteCheckTimer = setInterval(async () => {
-			console.log('⏰ Remote check timer fired')
-
-			if (!this.syncStateManager || !this.syncService) {
-				console.log('  ⚠️ syncStateManager or syncService not initialized, skipping')
-				return
-			}
-
-			const needsCheck = this.syncStateManager.needsRemoteCheck(2 * 60 * 1000)
-			console.log(`  needsRemoteCheck: ${needsCheck}`)
-
-			// Only check if we haven't checked recently
-			if (needsCheck) {
-				console.log('  🔍 Scheduled remote check: Checking for remote changes...')
-
-				try {
-					// Trigger a sync (which will check remote and download if needed)
-					const result = await this.syncService.syncVault()
-
-					if (result.downloadedFiles && result.downloadedFiles > 0) {
-						new Notice(`Downloaded ${result.downloadedFiles} file(s) from remote`)
-					}
-				} catch (error) {
-					console.error('  ❌ Remote check failed:', error)
-				}
-			} else {
-				console.log('  ⏭️ Remote check: Recently checked, skipping')
-			}
-		}, 2 * 60 * 1000) // Every 2 minutes
-
-		console.log('✅ Remote check timer started (every 2 minutes)')
-	}
-
-	private stopRemoteCheck() {
-		if (this.remoteCheckTimer) {
-			clearInterval(this.remoteCheckTimer)
-			this.remoteCheckTimer = null
-		}
-	}
-
-	private startIndexReconciliation() {
-		// Clear existing timer
-		if (this.indexReconcileTimer) {
-			clearInterval(this.indexReconcileTimer)
-		}
-
-		console.log('📊 Starting index reconciliation timer (every 5 minutes)...')
-
-		// Reconcile index every 5 minutes to catch any files created outside of Obsidian events
-		this.indexReconcileTimer = setInterval(async () => {
-			console.log('⏰ Index reconciliation timer fired')
-
-			if (!this.syncService) {
-				console.log('  ⚠️ Sync service not initialized, skipping')
-				return
-			}
-
-			try {
-				// Run index reconciliation
-				const newFilesFound = await this.syncService.reconcileIndex()
-
-				if (newFilesFound > 0) {
-					console.log(`  ✅ Found and uploaded ${newFilesFound} untracked file(s)`)
-					new Notice(`Found and uploaded ${newFilesFound} untracked file(s)`)
-
-					// Save the updated index
-					await this.saveSyncState()
-				}
-			} catch (error) {
-				console.error('  ❌ Index reconciliation failed:', error)
-			}
-		}, 5 * 60 * 1000) // Every 5 minutes
-
-		// Also run reconciliation immediately on startup after a short delay
-		setTimeout(async () => {
-			if (this.syncService) {
-				console.log('🔍 Running initial index reconciliation...')
-				try {
-					const newFilesFound = await this.syncService.reconcileIndex()
-					if (newFilesFound > 0) {
-						console.log(`✅ Initial reconciliation: Found ${newFilesFound} untracked file(s)`)
-						await this.saveSyncState()
-					}
-				} catch (error) {
-					console.error('❌ Initial index reconciliation failed:', error)
-				}
-			}
-		}, 5000) // 5 seconds after startup
-
-		console.log('✅ Index reconciliation timer started (every 5 minutes)')
-	}
-
-	private stopIndexReconciliation() {
-		if (this.indexReconcileTimer) {
-			clearInterval(this.indexReconcileTimer)
-			this.indexReconcileTimer = null
 		}
 	}
 
@@ -666,6 +532,17 @@ export default class ObsidianSyncPlugin extends Plugin {
 		} else {
 			this.stopAutoSync()
 		}
+	}
+
+	/**
+	 * Generate a UUID v4 for syncAgentId
+	 */
+	private generateUUID(): string {
+		return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+			const r = Math.random() * 16 | 0
+			const v = c === 'x' ? r : (r & 0x3 | 0x8)
+			return v.toString(16)
+		})
 	}
 }
 

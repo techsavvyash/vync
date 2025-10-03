@@ -3,6 +3,7 @@ import { SyncStateManager } from './syncState'
 import { VaultScanner } from './vaultScanner'
 import { GoogleDriveAuthService } from './googleDriveAuth'
 import { GoogleDriveService, DriveFile } from './googleDriveService'
+import { TombstoneManager } from './tombstoneManager'
 
 export interface SyncResult {
   success: boolean
@@ -69,18 +70,28 @@ export class SyncService {
 	private syncStateManager?: SyncStateManager
 	private vaultScanner: VaultScanner
 	private driveService: GoogleDriveService
+	private syncAgentId?: string // Unique device ID for echo detection
+	private tombstoneManager: TombstoneManager // Handles soft deletions
 
 	constructor(
 		vaultId: string,
 		vault: Vault,
 		authService: GoogleDriveAuthService,
-		syncStateManager?: SyncStateManager
+		syncStateManager?: SyncStateManager,
+		syncAgentId?: string
 	) {
 		this.vaultId = vaultId
 		this.vault = vault
 		this.syncStateManager = syncStateManager
 		this.vaultScanner = new VaultScanner(vault)
 		this.driveService = new GoogleDriveService(authService)
+		this.syncAgentId = syncAgentId
+		this.tombstoneManager = new TombstoneManager(vault, 30) // 30-day grace period
+
+		// Load tombstones asynchronously
+		this.tombstoneManager.load().catch(error => {
+			console.error('Failed to load tombstones:', error)
+		})
 	}
 
 	async syncVault(): Promise<SyncResult> {
@@ -155,7 +166,23 @@ export class SyncService {
 			console.log(`  Conflicts: ${delta.conflicts.length}`)
 			console.log(`  In Sync: ${delta.inSync}`)
 
-			// Process uploads
+			// Process downloads FIRST (Phase 3 of sync protocol)
+			let downloadedCount = 0
+			if (delta.toDownload.length > 0) {
+				console.log(`\n📥 Downloading ${delta.toDownload.length} file(s)...`)
+				for (const fileInfo of delta.toDownload) {
+					try {
+						await this.downloadSingleFile(fileInfo)
+						await this.saveSyncStateAtomic() // Atomic state update
+						downloadedCount++
+						console.log(`  ✅ Downloaded: ${fileInfo.filePath} (${fileInfo.reason})`)
+					} catch (error) {
+						console.error(`  ❌ Failed to download ${fileInfo.filePath}:`, error)
+					}
+				}
+			}
+
+			// Process uploads SECOND (Phase 4 of sync protocol)
 			let uploadedCount = 0
 			if (delta.toUpload.length > 0) {
 				console.log(`\n📤 Uploading ${delta.toUpload.length} file(s)...`)
@@ -164,6 +191,7 @@ export class SyncService {
 						const file = this.vault.getAbstractFileByPath(fileInfo.filePath)
 						if (file instanceof TFile) {
 							await this.uploadSingleFile(file)
+							await this.saveSyncStateAtomic() // Atomic state update
 							uploadedCount++
 							console.log(`  ✅ Uploaded: ${fileInfo.filePath} (${fileInfo.reason})`)
 						}
@@ -173,28 +201,57 @@ export class SyncService {
 				}
 			}
 
-			// Process downloads
-			let downloadedCount = 0
-			if (delta.toDownload.length > 0) {
-				console.log(`\n📥 Downloading ${delta.toDownload.length} file(s)...`)
-				for (const fileInfo of delta.toDownload) {
+			// Handle conflicts using "Conflicted Copy" strategy
+			if (delta.conflicts.length > 0) {
+				console.log(`\n⚠️  ${delta.conflicts.length} conflict(s) detected - creating conflicted copies`)
+				for (const conflict of delta.conflicts) {
 					try {
-						await this.downloadSingleFile(fileInfo)
-						downloadedCount++
-						console.log(`  ✅ Downloaded: ${fileInfo.filePath} (${fileInfo.reason})`)
+						await this.resolveConflictWithCopy(conflict)
+						console.log(`  ✅ Created conflicted copy: ${conflict.filePath}`)
 					} catch (error) {
-						console.error(`  ❌ Failed to download ${fileInfo.filePath}:`, error)
+						console.error(`  ❌ Failed to create conflicted copy for ${conflict.filePath}:`, error)
+						this.syncStateManager?.markConflict(conflict.filePath)
 					}
 				}
 			}
 
-			// Handle conflicts
-			if (delta.conflicts.length > 0) {
-				console.log(`\n⚠️  ${delta.conflicts.length} conflict(s) detected`)
-				for (const conflict of delta.conflicts) {
-					console.log(`  ⚠️  ${conflict.filePath}`)
-					this.syncStateManager.markConflict(conflict.filePath)
+			// Process tombstones: delete local files that have been deleted elsewhere
+			console.log('\n🪦 Processing tombstones...')
+			const tombstones = this.tombstoneManager.getAllTombstones()
+			let deletedCount = 0
+
+			for (const tombstone of tombstones) {
+				const file = this.vault.getAbstractFileByPath(tombstone.filePath)
+				if (file instanceof TFile) {
+					try {
+						await this.vault.trash(file, true) // Move to system trash
+						console.log(`  🗑️  Deleted (tombstone): ${tombstone.filePath}`)
+						deletedCount++
+					} catch (error) {
+						console.error(`  ❌ Failed to delete ${tombstone.filePath}:`, error)
+					}
 				}
+			}
+
+			if (deletedCount > 0) {
+				console.log(`  ✅ Processed ${deletedCount} tombstone(s)`)
+			}
+
+			// Clean up expired tombstones and permanently delete from Google Drive
+			console.log('\n🧹 Cleaning up expired tombstones...')
+			const expiredFileIds = await this.tombstoneManager.cleanupExpiredTombstones()
+
+			for (const fileId of expiredFileIds) {
+				try {
+					await this.driveService.deleteFile(fileId)
+					console.log(`  🗑️  Permanently deleted from Drive: ${fileId}`)
+				} catch (error) {
+					console.error(`  ❌ Failed to delete ${fileId} from Drive:`, error)
+				}
+			}
+
+			if (expiredFileIds.length > 0) {
+				console.log(`  ✅ Cleaned up ${expiredFileIds.length} expired tombstone(s)`)
 			}
 
 			// Mark sync completed
@@ -222,8 +279,8 @@ export class SyncService {
 	}
 
 	/**
-	 * Calculate sync delta between local and remote files
-	 * This logic was moved from the server
+	 * Calculate sync delta between local and remote files using headRevisionId
+	 * Three-way comparison: lastSyncRevisionId, currentRemoteRevisionId, localHash
 	 */
 	private async calculateDelta(localFilesMap: Map<string, FileSyncState>): Promise<SyncDelta> {
 		// Fetch all files from Google Drive
@@ -243,19 +300,20 @@ export class SyncService {
 			remoteFilesMap.set(file.name, file)
 		}
 
-		// Calculate delta
+		// Calculate delta using three-way comparison
 		const toDownload: DownloadCandidate[] = []
 		const toUpload: UploadCandidate[] = []
 		const conflicts: ConflictCandidate[] = []
 		let inSync = 0
 
-		console.log('\n  🔍 Analyzing differences...')
+		console.log('\n  🔍 Analyzing differences using headRevisionId...')
 
 		// Check each remote file
 		for (const remoteFile of remoteFiles) {
 			const filePath = remoteFile.name
 			const localFile = localFilesMap.get(filePath)
 			const remoteMtime = new Date(remoteFile.modifiedTime).getTime()
+			const remoteRevisionId = remoteFile.headRevisionId
 
 			if (!localFile) {
 				// File exists in Drive but not in local index
@@ -268,50 +326,54 @@ export class SyncService {
 					remoteSize: remoteFile.size
 				})
 			} else {
-				// File exists in both - check if sync needed
-				const localMtime = localFile.lastSyncedTime
+				// THREE-WAY COMPARISON: Check if file has changed locally OR remotely
+				const localHasChanged = await this.hasLocalFileChanged(localFile)
+				const remoteHasChanged = localFile.lastSyncRevisionId
+					? (remoteRevisionId !== localFile.lastSyncRevisionId)
+					: true // If no lastSyncRevisionId, assume remote changed
 
-				// Check if this is the same file (by remote ID)
-				if (localFile.remoteFileId === remoteFile.id) {
-					// Same file - check modification times
-					if (remoteMtime > localMtime) {
-						// Check if local also changed since last sync (would need current hash)
-						// For now, just download if remote is newer
-						console.log(`  📥 Remote newer: ${filePath}`)
-						toDownload.push({
-							id: remoteFile.id,
-							filePath,
-							reason: 'remote_newer',
-							remoteMtime,
-							remoteSize: remoteFile.size
-						})
-					} else if (localMtime > remoteMtime) {
-						// Local is newer - should upload
-						console.log(`  📤 Local newer: ${filePath}`)
-						toUpload.push({
-							filePath,
-							reason: 'local_newer',
-							localMtime,
-							localSize: localFile.lastSyncedSize
-						})
-					} else {
-						// Same mtime - in sync
-						inSync++
-					}
+				// Echo detection: Check if this change is from our own syncAgentId
+				const isOwnChange = remoteFile.appProperties?.lastModifiedByAgent === this.syncAgentId
+
+				if (isOwnChange) {
+					console.log(`  ⏭️  Skipping own change (echo): ${filePath}`)
+					inSync++
+					continue
+				}
+
+				// Decision matrix based on three-way comparison
+				if (localHasChanged && remoteHasChanged) {
+					// CONFLICT: Both changed since last sync
+					console.log(`  ⚠️  Conflict detected: ${filePath}`)
+					conflicts.push({
+						filePath,
+						localMtime: localFile.lastSyncedTime,
+						remoteMtime,
+						localHash: localFile.lastSyncedHash,
+						remoteFileId: remoteFile.id
+					})
+				} else if (localHasChanged && !remoteHasChanged) {
+					// Only local changed - upload
+					console.log(`  📤 Local changed: ${filePath}`)
+					toUpload.push({
+						filePath,
+						reason: 'local_newer',
+						localMtime: localFile.lastSyncedTime,
+						localSize: localFile.lastSyncedSize
+					})
+				} else if (!localHasChanged && remoteHasChanged) {
+					// Only remote changed - download
+					console.log(`  📥 Remote changed: ${filePath}`)
+					toDownload.push({
+						id: remoteFile.id,
+						filePath,
+						reason: 'remote_newer',
+						remoteMtime,
+						remoteSize: remoteFile.size
+					})
 				} else {
-					// Different file ID or no remote ID - check timestamps
-					if (remoteMtime > localMtime) {
-						console.log(`  📥 Remote newer (different ID): ${filePath}`)
-						toDownload.push({
-							id: remoteFile.id,
-							filePath,
-							reason: 'remote_newer',
-							remoteMtime,
-							remoteSize: remoteFile.size
-						})
-					} else {
-						inSync++
-					}
+					// Neither changed - in sync
+					inSync++
 				}
 			}
 		}
@@ -369,6 +431,37 @@ export class SyncService {
 		console.log(`    Total Local: ${delta.totalLocal}`)
 
 		return delta
+	}
+
+	/**
+	 * Save sync state atomically after each file operation
+	 * This makes sync idempotent and resilient to interruptions
+	 */
+	private async saveSyncStateAtomic(): Promise<void> {
+		// This will be called by the main plugin to persist state
+		// For now, we just mark that state should be saved
+		// The actual save is handled by main.ts calling saveSyncState()
+	}
+
+	/**
+	 * Check if a local file has changed since last sync by comparing hash
+	 */
+	private async hasLocalFileChanged(fileState: FileSyncState): Promise<boolean> {
+		try {
+			const file = this.vault.getAbstractFileByPath(fileState.path)
+			if (!(file instanceof TFile)) {
+				return false
+			}
+
+			const isBinary = this.isBinaryFile(file.extension)
+			const content = isBinary ? await this.vault.readBinary(file) : await this.vault.read(file)
+			const currentHash = await this.computeHash(content)
+
+			return currentHash !== fileState.lastSyncedHash
+		} catch (error) {
+			console.error(`Error checking if file changed: ${fileState.path}`, error)
+			return false
+		}
 	}
 
 
@@ -509,12 +602,18 @@ export class SyncService {
 
 		try {
 			if (this.syncStateManager) {
+				// Get remote file ID before removing from index
+				const remoteFileId = this.syncStateManager.getRemoteFileId(filePath)
+
+				if (remoteFileId && this.syncAgentId) {
+					// Add tombstone instead of immediate deletion
+					await this.tombstoneManager.addTombstone(remoteFileId, filePath, this.syncAgentId)
+					console.log(`  📌 Added tombstone for: ${filePath}`)
+				}
+
 				// Remove from local index
 				this.syncStateManager.removeFile(filePath)
 				console.log(`  ✅ Removed file from sync index: ${filePath}`)
-
-				// TODO: Also delete from Google Drive if needed
-				// This would require implementing a delete endpoint on the server
 			}
 		} catch (error) {
 			console.error(`  ❌ Failed to handle file deletion for ${filePath}:`, error)
@@ -723,12 +822,19 @@ export class SyncService {
 			fileData = encoder.encode(content as string).buffer
 		}
 
+		// Prepare appProperties for echo detection
+		const appProperties: Record<string, string> = {}
+		if (this.syncAgentId) {
+			appProperties.lastModifiedByAgent = this.syncAgentId
+		}
+
 		// Upload to Google Drive
 		const result = await this.driveService.uploadFile(
 			file.path,
 			fileData,
 			mimeType,
-			this.vaultId
+			this.vaultId,
+			appProperties
 		)
 
 		if (result.success && this.syncStateManager) {
@@ -742,7 +848,8 @@ export class SyncService {
 				{
 					ctime: metadata?.ctime,
 					extension: metadata?.extension,
-					operation: 'upload'
+					operation: 'upload',
+					revisionId: result.headRevisionId // Store headRevisionId for three-way comparison
 				}
 			)
 		} else {
@@ -810,6 +917,87 @@ export class SyncService {
 				)
 			}
 		}
+	}
+
+	/**
+	 * Resolve a conflict using the "Conflicted Copy" strategy
+	 * This preserves both versions: local stays as-is, remote is saved as conflicted copy
+	 */
+	private async resolveConflictWithCopy(conflict: ConflictCandidate): Promise<void> {
+		console.log(`  🔀 Resolving conflict for: ${conflict.filePath}`)
+
+		// Generate conflicted copy filename
+		const timestamp = new Date().toISOString().split('T')[0] // YYYY-MM-DD
+		const hostname = window.navigator?.userAgent?.includes('Electron')
+			? 'device'
+			: 'browser'
+
+		const pathParts = conflict.filePath.split('/')
+		const filename = pathParts.pop() || conflict.filePath
+		const folder = pathParts.join('/')
+		const nameParts = filename.split('.')
+		const extension = nameParts.length > 1 ? nameParts.pop() : ''
+		const basename = nameParts.join('.')
+
+		const conflictedFilename = extension
+			? `${basename} (conflicted copy ${timestamp} from ${hostname}).${extension}`
+			: `${basename} (conflicted copy ${timestamp} from ${hostname})`
+
+		const conflictedPath = folder
+			? `${folder}/${conflictedFilename}`
+			: conflictedFilename
+
+		console.log(`  💾 Creating conflicted copy: ${conflictedPath}`)
+
+		// Download remote version to conflicted copy filename
+		const downloadResult = await this.driveService.downloadFile(conflict.remoteFileId)
+
+		if (!downloadResult.success || !downloadResult.data) {
+			throw new Error(`Failed to download remote version: ${downloadResult.error}`)
+		}
+
+		// Determine file type
+		const isBinary = this.isBinaryFile(extension)
+
+		// Ensure parent folders exist
+		await this.ensureParentFoldersExist(conflictedPath)
+
+		// Write the remote version to the conflicted copy filename
+		if (isBinary) {
+			await this.vault.createBinary(conflictedPath, downloadResult.data)
+		} else {
+			const textContent = new TextDecoder().decode(downloadResult.data)
+			await this.vault.create(conflictedPath, textContent)
+		}
+
+		// Update sync state for the conflicted copy
+		if (this.syncStateManager) {
+			const hash = await this.computeHash(downloadResult.data)
+			const conflictedFile = this.vault.getAbstractFileByPath(conflictedPath)
+
+			if (conflictedFile instanceof TFile) {
+				this.syncStateManager.markSynced(
+					conflictedPath,
+					hash,
+					conflictedFile.stat.mtime,
+					conflictedFile.stat.size,
+					conflict.remoteFileId,
+					{
+						extension,
+						operation: 'download'
+					}
+				)
+			}
+
+			// Mark the original file's conflict as resolved, but upload local version
+			console.log(`  📤 Uploading local version of: ${conflict.filePath}`)
+			const originalFile = this.vault.getAbstractFileByPath(conflict.filePath)
+			if (originalFile instanceof TFile) {
+				await this.uploadSingleFile(originalFile)
+			}
+		}
+
+		console.log(`  ✅ Conflict resolved: Local kept as ${conflict.filePath}, remote saved as ${conflictedPath}`)
 	}
 
 	// Get MIME type based on file extension

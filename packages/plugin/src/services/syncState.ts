@@ -16,12 +16,14 @@ export interface FileSyncState {
   lastSyncedHash: string
   lastSyncedTime: number
   lastSyncedSize: number
+  lastSyncRevisionId?: string // Google Drive headRevisionId - authoritative version identifier
   createdTime?: number // NEW: File creation time (ctime)
   extension?: string // NEW: File extension for quick filtering
   remoteFileId?: string
   lastRemoteCheck?: number // When we last checked remote version
   remoteHash?: string // Last known remote hash
   remoteMtime?: number // Last known remote modification time
+  remoteRevisionId?: string // Current remote headRevisionId
   // NEW: Enhanced tracking
   firstSyncedTime?: number // When file was first synced
   syncCount?: number // Number of times file has been synced
@@ -114,6 +116,7 @@ export class SyncStateManager {
       ctime?: number
       extension?: string
       operation?: 'upload' | 'download'
+      revisionId?: string // Google Drive headRevisionId
     }
   ): void {
     const existing = this.state.files.get(filePath)
@@ -139,12 +142,14 @@ export class SyncStateManager {
       lastSyncedHash: hash,
       lastSyncedTime: mtime,
       lastSyncedSize: size,
+      lastSyncRevisionId: options?.revisionId || existing?.lastSyncRevisionId,
       createdTime: options?.ctime || existing?.createdTime,
       extension: options?.extension || existing?.extension || this.getExtension(filePath),
       remoteFileId: remoteFileId || existing?.remoteFileId,
       lastRemoteCheck: existing?.lastRemoteCheck,
       remoteHash: existing?.remoteHash,
       remoteMtime: existing?.remoteMtime,
+      remoteRevisionId: options?.revisionId || existing?.remoteRevisionId,
       firstSyncedTime: existing?.firstSyncedTime || now,
       syncCount: (existing?.syncCount || 0) + 1,
       lastError: undefined, // Clear error on successful sync
@@ -398,13 +403,14 @@ export class SyncStateManager {
   /**
    * Update remote file information from metadata
    */
-  updateRemoteFileInfo(filePath: string, remoteFileId: string, remoteMtime: number, remoteHash?: string): void {
+  updateRemoteFileInfo(filePath: string, remoteFileId: string, remoteMtime: number, remoteHash?: string, remoteRevisionId?: string): void {
     const existing = this.state.files.get(filePath)
     if (existing) {
       existing.lastRemoteCheck = Date.now()
       existing.remoteMtime = remoteMtime
       existing.remoteHash = remoteHash
       existing.remoteFileId = remoteFileId
+      existing.remoteRevisionId = remoteRevisionId
     } else {
       // File exists remotely but not in our index - needs download
       this.state.files.set(filePath, {
@@ -415,7 +421,8 @@ export class SyncStateManager {
         remoteFileId,
         lastRemoteCheck: Date.now(),
         remoteMtime,
-        remoteHash
+        remoteHash,
+        remoteRevisionId
       })
     }
   }
