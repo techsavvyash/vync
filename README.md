@@ -50,24 +50,22 @@ cp -r dist/* /path/to/your/vault/.obsidian/plugins/vync/
 3. Complete OAuth flow
 4. Start syncing!
 
-**📖 Detailed guide:** See [QUICK_START.md](QUICK_START.md)
+**📖 Detailed guide:** See [Quick Start Guide](docs/quick-start.md)
 
 ## 📋 Documentation
 
 ### Getting Started
-- **[Quick Start Guide](QUICK_START.md)** - Get running in 5 minutes
-- **[Google OAuth Setup](docs/OAUTH_SETUP.md)** - Configure Google Drive API
+- **[Quick Start Guide](docs/quick-start.md)** - Complete setup walkthrough (10 minutes)
+- **[OAuth Setup](docs/quick-start.md#step-1-google-drive-api-setup-5-minutes)** - Google Drive API configuration
 
-### Features
-- **[Sync Logic](docs/SYNC_LOGIC.md)** - How the sync algorithm works
-- **[Folder Sync](FOLDER_SYNC_DOCUMENTATION.md)** - Folder structure preservation
-- **[Conflict Resolution](docs/CONFLICTS.md)** - Handling sync conflicts
-- **[Tombstone Management](docs/TOMBSTONES.md)** - Deletion tracking
+### Features & Reference
+- **[Sync Algorithm](docs/sync.md)** - Three-way merge and conflict detection
+- **[Unit Tests](packages/plugin/tests/)** - Test suite with examples
+- **[Changelog](CHANGELOG.md)** - Version history and updates
 
-### Reference
-- **[Plugin API](packages/plugin/README.md)** - Plugin documentation
-- **[Changelog](CHANGELOG.md)** - Version history
-- **[Architecture](docs/ARCHITECTURE.md)** - Technical overview
+### Development
+- **[Plugin Source](packages/plugin/src/)** - Browse source code
+- **[Contributing](#-contributing)** - How to contribute
 
 ## 🏗️ Architecture
 
@@ -320,4 +318,4 @@ If this project helps you, consider giving it a star!
 
 **Status**: Beta Testing 🚧
 
-[Quick Start](QUICK_START.md) | [Documentation](#-documentation) | [Architecture](#-architecture) | [Contributing](#-contributing)
+[Quick Start](docs/quick-start.md) | [Documentation](#-documentation) | [Architecture](#-architecture) | [Contributing](#-contributing)
