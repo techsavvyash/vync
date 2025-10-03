@@ -1,0 +1,31 @@
+{
+  "name": "@techsavvyash/vync-installer",
+  "version": "0.0.2",
+  "description": "CLI installer for Vync Obsidian plugin",
+  "type": "module",
+  "bin": {
+    "vync-install": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target node --format esm",
+    "dev": "bun build src/index.ts --outdir dist --target node --format esm --watch",
+    "prepublishOnly": "bun run build"
+  },
+  "keywords": [
+    "obsidian",
+    "vync",
+    "installer",
+    "cli"
+  ],
+  "author": "techsavvyash",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/techsavvyash/vync.git",
+    "directory": "packages/installer"
+  },
+  "files": [
+    "dist"
+  ],
+  "dependencies": {}
+}
