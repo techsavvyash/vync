@@ -94,6 +94,84 @@ export class SyncService {
 		})
 	}
 
+	/**
+	 * Force upload all local files to Google Drive, overwriting remote versions
+	 * This is useful when you want to push all local changes to Drive, regardless of sync state
+	 */
+	async forceUploadAll(): Promise<SyncResult> {
+		try {
+			console.log(`\n🚀 Starting force upload of all local files to Google Drive...`)
+
+			if (!this.syncStateManager) {
+				console.warn('⚠️  No sync state manager - cannot sync without it')
+				return {
+					success: false,
+					message: 'No sync state manager available'
+				}
+			}
+
+			// Scan vault for all relevant files
+			console.log('🔍 Scanning vault for files...')
+			const vaultFiles = await this.vaultScanner.scanVault({
+				includeExtensions: ['.md', '.txt', '.pdf', '.png', '.jpg', '.jpeg', '.gif', '.svg'],
+				recursive: true
+			})
+
+			// Filter out folders
+			const filesToUpload = vaultFiles.filter(f => !f.isFolder)
+			console.log(`📊 Found ${filesToUpload.length} file(s) to upload`)
+
+			if (filesToUpload.length === 0) {
+				return {
+					success: true,
+					message: 'No files to upload',
+					uploadedFiles: 0
+				}
+			}
+
+			let uploadedCount = 0
+			let errorCount = 0
+
+			console.log(`\n📤 Force uploading ${filesToUpload.length} file(s)...`)
+			for (const vaultFile of filesToUpload) {
+				try {
+					const file = this.vault.getAbstractFileByPath(vaultFile.path)
+					if (file instanceof TFile) {
+						console.log(`  ⬆️  Uploading: ${vaultFile.path}`)
+						await this.uploadSingleFile(file)
+						await this.saveSyncStateAtomic()
+						uploadedCount++
+						console.log(`  ✅ Uploaded: ${vaultFile.path}`)
+					}
+				} catch (error) {
+					console.error(`  ❌ Failed to upload ${vaultFile.path}:`, error)
+					errorCount++
+				}
+			}
+
+			console.log(`\n✅ Force upload completed: ${uploadedCount} uploaded, ${errorCount} errors`)
+
+			// Mark sync completed
+			this.syncStateManager.markFullSyncCompleted()
+			this.syncStateManager.markRemoteCheckCompleted()
+
+			return {
+				success: true,
+				message: errorCount > 0
+					? `Force upload completed with errors: ${uploadedCount} uploaded, ${errorCount} failed`
+					: 'Force upload completed successfully',
+				uploadedFiles: uploadedCount
+			}
+
+		} catch (error) {
+			console.error('Force upload failed:', error)
+			return {
+				success: false,
+				message: `Force upload failed: ${error}`
+			}
+		}
+	}
+
 	async syncVault(): Promise<SyncResult> {
 		try {
 			console.log(`\n🔄 Starting delta sync for vault: ${this.vaultId}`)
@@ -385,12 +463,23 @@ export class SyncService {
 			if (!remoteFile) {
 				// File exists locally but not in Drive
 
-				// Skip if this is a remote-only tracking entry
-				if (localFile.lastSyncedTime === 0 && localFile.lastSyncedHash === '') {
+				// Check if file actually exists in the vault
+				const fileExists = this.vault.getAbstractFileByPath(filePath) instanceof TFile
+
+				// Skip if this is a remote-only tracking entry (doesn't exist locally and has empty state)
+				if (!fileExists && localFile.lastSyncedTime === 0 && localFile.lastSyncedHash === '') {
 					console.log(`  ⏭️  Skipping remote-only tracking entry: ${filePath}`)
 					continue
 				}
 
+				// If file doesn't exist locally but has sync state, it was deleted locally
+				if (!fileExists) {
+					console.log(`  🗑️  File deleted locally: ${filePath}`)
+					// TODO: Handle local deletion (add to tombstones?)
+					continue
+				}
+
+				// File exists locally and needs to be uploaded
 				if (!localFile.remoteFileId) {
 					// Never synced before
 					console.log(`  📤 New local file: ${filePath}`)

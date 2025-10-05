@@ -1,6 +1,6 @@
 {
   "name": "@techsavvyash/vync",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "scripts": {
     "build": "bun build src/main.ts --outdir . --format cjs --external obsidian",
     "dev": "bun build src/main.ts --outdir . --format cjs --external obsidian --watch",

@@ -124,6 +124,39 @@ export default class VyncPlugin extends Plugin {
 			}
 		})
 
+		this.addCommand({
+			id: 'force-upload-all',
+			name: 'Force Upload All Files',
+			callback: async () => {
+				if (!this.syncService) {
+					new Notice('Sync service not initialized')
+					return
+				}
+
+				// Show confirmation modal before proceeding
+				const confirmModal = new ConfirmationModal(
+					this.app,
+					'Force Upload All Files',
+					'This will upload ALL local files to Google Drive, overwriting any remote versions. This is useful for pushing all changes when something breaks. Are you sure you want to continue?',
+					async () => {
+						new Notice('Starting force upload of all files...')
+						try {
+							const result = await this.syncService.forceUploadAll()
+							if (result.success) {
+								new Notice(`Force upload completed: ${result.uploadedFiles} file(s) uploaded`)
+								await this.saveSyncState()
+							} else {
+								new Notice(`Force upload failed: ${result.message}`)
+							}
+						} catch (error) {
+							new Notice('Force upload failed: ' + (error as Error).message)
+						}
+					}
+				)
+				confirmModal.open()
+			}
+		})
+
 		console.log('Vync plugin loaded')
 	}
 
@@ -688,15 +721,42 @@ class VyncSettingTab extends PluginSettingTab {
 					await this.plugin.saveSettings()
 				}))
 
-		// Add test connection button
+		// Advanced Operations Section
+		containerEl.createEl('h3', { text: 'Advanced Operations' })
+
+		// Add force upload button
 		new Setting(containerEl)
-			.setName('Test Connection')
-			.setDesc('Test connection to sync server')
+			.setName('Force Upload All Files')
+			.setDesc('Upload all local files to Google Drive, overwriting remote versions. Use this when you need to push all changes.')
 			.addButton(button => button
-				.setButtonText('Test Connection')
-				.setCta()
-				.onClick(() => {
-					this.plugin.testConnection()
+				.setButtonText('Force Upload All')
+				.setWarning()
+				.onClick(async () => {
+					if (!this.plugin.syncService) {
+						new Notice('Sync service not initialized')
+						return
+					}
+
+					const confirmModal = new ConfirmationModal(
+						this.app,
+						'Force Upload All Files',
+						'This will upload ALL local files to Google Drive, overwriting any remote versions. This operation may take a while depending on the number of files. Are you sure?',
+						async () => {
+							new Notice('Starting force upload...')
+							try {
+								const result = await this.plugin.syncService.forceUploadAll()
+								if (result.success) {
+									new Notice(`Force upload completed: ${result.uploadedFiles} file(s) uploaded`)
+									await this.plugin.saveSyncState()
+								} else {
+									new Notice(`Force upload failed: ${result.message}`)
+								}
+							} catch (error) {
+								new Notice('Force upload failed: ' + (error as Error).message)
+							}
+						}
+					)
+					confirmModal.open()
 				}))
 	}
 
@@ -766,6 +826,50 @@ class OAuthCallbackModal extends Modal {
 
 		// Focus on input
 		setTimeout(() => this.codeInput.focus(), 100)
+	}
+
+	onClose() {
+		const { contentEl } = this
+		contentEl.empty()
+	}
+}
+
+// Confirmation Modal for destructive actions
+class ConfirmationModal extends Modal {
+	private title: string
+	private message: string
+	private onConfirm: () => Promise<void>
+
+	constructor(app: App, title: string, message: string, onConfirm: () => Promise<void>) {
+		super(app)
+		this.title = title
+		this.message = message
+		this.onConfirm = onConfirm
+	}
+
+	onOpen() {
+		const { contentEl } = this
+
+		contentEl.createEl('h2', { text: this.title })
+		contentEl.createEl('p', { text: this.message })
+
+		// Add buttons
+		const buttonContainer = contentEl.createDiv()
+		buttonContainer.style.display = 'flex'
+		buttonContainer.style.justifyContent = 'flex-end'
+		buttonContainer.style.gap = '10px'
+		buttonContainer.style.marginTop = '20px'
+
+		const cancelButton = buttonContainer.createEl('button', { text: 'Cancel' })
+		cancelButton.addEventListener('click', () => {
+			this.close()
+		})
+
+		const confirmButton = buttonContainer.createEl('button', { text: 'Confirm', cls: 'mod-warning' })
+		confirmButton.addEventListener('click', async () => {
+			this.close()
+			await this.onConfirm()
+		})
 	}
 
 	onClose() {

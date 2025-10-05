@@ -912,6 +912,67 @@ class SyncService {
       console.error("Failed to load tombstones:", error);
     });
   }
+  async forceUploadAll() {
+    try {
+      console.log(`
+\uD83D\uDE80 Starting force upload of all local files to Google Drive...`);
+      if (!this.syncStateManager) {
+        console.warn("⚠️  No sync state manager - cannot sync without it");
+        return {
+          success: false,
+          message: "No sync state manager available"
+        };
+      }
+      console.log("\uD83D\uDD0D Scanning vault for files...");
+      const vaultFiles = await this.vaultScanner.scanVault({
+        includeExtensions: [".md", ".txt", ".pdf", ".png", ".jpg", ".jpeg", ".gif", ".svg"],
+        recursive: true
+      });
+      const filesToUpload = vaultFiles.filter((f) => !f.isFolder);
+      console.log(`\uD83D\uDCCA Found ${filesToUpload.length} file(s) to upload`);
+      if (filesToUpload.length === 0) {
+        return {
+          success: true,
+          message: "No files to upload",
+          uploadedFiles: 0
+        };
+      }
+      let uploadedCount = 0;
+      let errorCount = 0;
+      console.log(`
+\uD83D\uDCE4 Force uploading ${filesToUpload.length} file(s)...`);
+      for (const vaultFile of filesToUpload) {
+        try {
+          const file = this.vault.getAbstractFileByPath(vaultFile.path);
+          if (file instanceof import_obsidian3.TFile) {
+            console.log(`  ⬆️  Uploading: ${vaultFile.path}`);
+            await this.uploadSingleFile(file);
+            await this.saveSyncStateAtomic();
+            uploadedCount++;
+            console.log(`  ✅ Uploaded: ${vaultFile.path}`);
+          }
+        } catch (error) {
+          console.error(`  ❌ Failed to upload ${vaultFile.path}:`, error);
+          errorCount++;
+        }
+      }
+      console.log(`
+✅ Force upload completed: ${uploadedCount} uploaded, ${errorCount} errors`);
+      this.syncStateManager.markFullSyncCompleted();
+      this.syncStateManager.markRemoteCheckCompleted();
+      return {
+        success: true,
+        message: errorCount > 0 ? `Force upload completed with errors: ${uploadedCount} uploaded, ${errorCount} failed` : "Force upload completed successfully",
+        uploadedFiles: uploadedCount
+      };
+    } catch (error) {
+      console.error("Force upload failed:", error);
+      return {
+        success: false,
+        message: `Force upload failed: ${error}`
+      };
+    }
+  }
   async syncVault() {
     try {
       console.log(`
@@ -1141,8 +1202,13 @@ class SyncService {
     for (const [filePath, localFile] of localFilesMap.entries()) {
       const remoteFile = remoteFilesMap.get(filePath);
       if (!remoteFile) {
-        if (localFile.lastSyncedTime === 0 && localFile.lastSyncedHash === "") {
+        const fileExists = this.vault.getAbstractFileByPath(filePath) instanceof import_obsidian3.TFile;
+        if (!fileExists && localFile.lastSyncedTime === 0 && localFile.lastSyncedHash === "") {
           console.log(`  ⏭️  Skipping remote-only tracking entry: ${filePath}`);
+          continue;
+        }
+        if (!fileExists) {
+          console.log(`  \uD83D\uDDD1️  File deleted locally: ${filePath}`);
           continue;
         }
         if (!localFile.remoteFileId) {
@@ -1770,8 +1836,8 @@ class SyncStateManager {
       this.state = {
         ...initialState,
         lastRemoteCheck: initialState.lastRemoteCheck || 0,
-        files: new Map(Object.entries(initialState.files || {})),
-        folders: new Map(Object.entries(initialState.folders || {}))
+        files: initialState.files instanceof Map ? initialState.files : new Map(Object.entries(initialState.files || {})),
+        folders: initialState.folders instanceof Map ? initialState.folders : new Map(Object.entries(initialState.folders || {}))
       };
     } else {
       this.state = {
@@ -2112,15 +2178,17 @@ class SyncStateManager {
     return false;
   }
   renameFolder(oldPath, newPath) {
-    const folderState = this.state.folders.get(oldPath);
+    const normalizedOldPath = oldPath.endsWith("/") ? oldPath : oldPath + "/";
+    const normalizedNewPath = newPath.endsWith("/") ? newPath : newPath + "/";
+    const folderState = this.state.folders.get(normalizedOldPath);
     if (folderState) {
-      folderState.path = newPath;
-      this.state.folders.set(newPath, folderState);
-      this.state.folders.delete(oldPath);
+      folderState.path = normalizedNewPath;
+      this.state.folders.set(normalizedNewPath, folderState);
+      this.state.folders.delete(normalizedOldPath);
       const filesToUpdate = [];
       this.state.files.forEach((fileState, filePath) => {
-        if (filePath.startsWith(oldPath + "/")) {
-          const newFilePath = filePath.replace(oldPath, newPath);
+        if (filePath.startsWith(normalizedOldPath)) {
+          const newFilePath = normalizedNewPath + filePath.substring(normalizedOldPath.length);
           fileState.path = newFilePath;
           filesToUpdate.push([newFilePath, fileState]);
           this.state.files.delete(filePath);
@@ -2129,7 +2197,7 @@ class SyncStateManager {
       filesToUpdate.forEach(([path, state]) => {
         this.state.files.set(path, state);
       });
-      console.log(`\uD83D\uDCC1 Renamed folder: ${oldPath} → ${newPath}`);
+      console.log(`\uD83D\uDCC1 Renamed folder: ${normalizedOldPath} → ${normalizedNewPath}`);
       console.log(`   Updated ${filesToUpdate.length} file(s) in folder`);
     }
   }
@@ -2481,6 +2549,31 @@ class VyncPlugin extends import_obsidian6.Plugin {
         } else {
           new import_obsidian6.Notice("Sync service not initialized");
         }
+      }
+    });
+    this.addCommand({
+      id: "force-upload-all",
+      name: "Force Upload All Files",
+      callback: async () => {
+        if (!this.syncService) {
+          new import_obsidian6.Notice("Sync service not initialized");
+          return;
+        }
+        const confirmModal = new ConfirmationModal(this.app, "Force Upload All Files", "This will upload ALL local files to Google Drive, overwriting any remote versions. This is useful for pushing all changes when something breaks. Are you sure you want to continue?", async () => {
+          new import_obsidian6.Notice("Starting force upload of all files...");
+          try {
+            const result = await this.syncService.forceUploadAll();
+            if (result.success) {
+              new import_obsidian6.Notice(`Force upload completed: ${result.uploadedFiles} file(s) uploaded`);
+              await this.saveSyncState();
+            } else {
+              new import_obsidian6.Notice(`Force upload failed: ${result.message}`);
+            }
+          } catch (error) {
+            new import_obsidian6.Notice("Force upload failed: " + error.message);
+          }
+        });
+        confirmModal.open();
       }
     });
     console.log("Vync plugin loaded");
@@ -2840,8 +2933,27 @@ class VyncSettingTab extends import_obsidian6.PluginSettingTab {
       this.plugin.settings.conflictResolution = value;
       await this.plugin.saveSettings();
     }));
-    new import_obsidian6.Setting(containerEl).setName("Test Connection").setDesc("Test connection to sync server").addButton((button) => button.setButtonText("Test Connection").setCta().onClick(() => {
-      this.plugin.testConnection();
+    containerEl.createEl("h3", { text: "Advanced Operations" });
+    new import_obsidian6.Setting(containerEl).setName("Force Upload All Files").setDesc("Upload all local files to Google Drive, overwriting remote versions. Use this when you need to push all changes.").addButton((button) => button.setButtonText("Force Upload All").setWarning().onClick(async () => {
+      if (!this.plugin.syncService) {
+        new import_obsidian6.Notice("Sync service not initialized");
+        return;
+      }
+      const confirmModal = new ConfirmationModal(this.app, "Force Upload All Files", "This will upload ALL local files to Google Drive, overwriting any remote versions. This operation may take a while depending on the number of files. Are you sure?", async () => {
+        new import_obsidian6.Notice("Starting force upload...");
+        try {
+          const result = await this.plugin.syncService.forceUploadAll();
+          if (result.success) {
+            new import_obsidian6.Notice(`Force upload completed: ${result.uploadedFiles} file(s) uploaded`);
+            await this.plugin.saveSyncState();
+          } else {
+            new import_obsidian6.Notice(`Force upload failed: ${result.message}`);
+          }
+        } catch (error) {
+          new import_obsidian6.Notice("Force upload failed: " + error.message);
+        }
+      });
+      confirmModal.open();
     }));
   }
 }
@@ -2895,6 +3007,41 @@ class OAuthCallbackModal extends import_obsidian6.Modal {
       }
     });
     setTimeout(() => this.codeInput.focus(), 100);
+  }
+  onClose() {
+    const { contentEl } = this;
+    contentEl.empty();
+  }
+}
+
+class ConfirmationModal extends import_obsidian6.Modal {
+  title;
+  message;
+  onConfirm;
+  constructor(app, title, message, onConfirm) {
+    super(app);
+    this.title = title;
+    this.message = message;
+    this.onConfirm = onConfirm;
+  }
+  onOpen() {
+    const { contentEl } = this;
+    contentEl.createEl("h2", { text: this.title });
+    contentEl.createEl("p", { text: this.message });
+    const buttonContainer = contentEl.createDiv();
+    buttonContainer.style.display = "flex";
+    buttonContainer.style.justifyContent = "flex-end";
+    buttonContainer.style.gap = "10px";
+    buttonContainer.style.marginTop = "20px";
+    const cancelButton = buttonContainer.createEl("button", { text: "Cancel" });
+    cancelButton.addEventListener("click", () => {
+      this.close();
+    });
+    const confirmButton = buttonContainer.createEl("button", { text: "Confirm", cls: "mod-warning" });
+    confirmButton.addEventListener("click", async () => {
+      this.close();
+      await this.onConfirm();
+    });
   }
   onClose() {
     const { contentEl } = this;
