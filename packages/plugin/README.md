@@ -92,6 +92,29 @@ bun run build
 
 The built plugin will be in `main.js`.
 
+### Testing
+
+```bash
+# Run all tests
+bun test
+
+# Run tests in watch mode
+bun test:watch
+
+# Run tests with coverage
+bun test:coverage
+
+# Run iOS-specific tests
+bun run test:ios
+```
+
+#### iOS Testing
+
+For testing the plugin on iOS devices:
+- **[iOS Testing Guide](docs/IOS_TESTING.md)** - Complete manual testing instructions
+- **[iOS Testing Checklist](docs/IOS_TESTING_CHECKLIST.md)** - Comprehensive testing checklist
+- **[iOS Test Suite](tests/ios/)** - Automated iOS-specific tests
+
 ### Project Structure
 
 ```
