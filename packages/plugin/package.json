@@ -7,9 +7,11 @@
     "lint": "eslint src --ext .ts",
     "lint:fix": "eslint src --ext .ts --fix",
     "typecheck": "tsc --noEmit",
-    "test": "node --max-old-space-size=4096 ./node_modules/.bin/jest",
-    "test:watch": "jest --watch",
-    "test:coverage": "jest --coverage"
+    "test": "bunx jest",
+    "test:watch": "bunx jest --watch",
+    "test:coverage": "bunx jest --coverage",
+    "test:ios": "bunx jest --testPathPattern=ios",
+    "test:ios:watch": "bunx jest --testPathPattern=ios --watch"
   },
   "dependencies": {
     "googleapis": "^161.0.0",
